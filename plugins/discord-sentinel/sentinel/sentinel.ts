@@ -312,15 +312,21 @@ function createClient(botName: string, config: BotConfig): Client {
       )
       log(`[${botName}] DM from ${data.author.username} — spawning session`)
 
+      // IMPORTANT: Disconnect from gateway BEFORE spawning Claude.
+      // Discord only allows one gateway connection per token. If the sentinel
+      // holds the gateway while Claude's discord plugin tries to connect,
+      // the plugin either gets rejected or kicks the sentinel — both break.
+      await disconnectBot(botName, state)
+
       const pid = await spawnSession(botName, config)
 
       if (pid) {
         createLock(botName, pid)
-        await disconnectBot(botName, state)
         state.status = 'active'
       } else {
-        await msg.reply('Failed to start session. Check sentinel logs.')
-        state.status = 'idle'
+        // Spawn failed — reclaim the gateway
+        log(`[${botName}] Spawn failed — reclaiming gateway`)
+        await connectBot(botName, state)
       }
     } catch (err: any) {
       log(`[${botName}] Spawn error: ${err.message}`)

@@ -318,11 +318,14 @@ function createClient(botName: string, config: BotConfig): Client {
       // Set presence to "online" before disconnecting. Discord preserves
       // the last presence until a new gateway connection overrides it, so
       // the bot stays visibly online while Claude's session is active.
+      // Wait briefly for the websocket to flush the presence update before
+      // destroying the connection.
       if (state.client?.user) {
         state.client.user.setPresence({
           status: 'online',
           activities: [{ name: `Active session`, type: ActivityType.Playing }],
         })
+        await new Promise(r => setTimeout(r, 1000))
       }
 
       // IMPORTANT: Disconnect from gateway BEFORE spawning Claude.

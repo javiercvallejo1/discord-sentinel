@@ -2,24 +2,22 @@
   "hooks": {
     "SessionStart": [
       {
-        "matcher": {},
+        "matcher": "",
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/session-start-hook.sh"
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/session-start-hook.sh\""
           }
         ]
       }
     ],
     "PreToolUse": [
       {
-        "matcher": {
-          "tool_name": "Bash|Write"
-        },
+        "matcher": "Bash|Write",
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/discord-approve.sh"
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/discord-approve.sh\""
           }
         ]
       }

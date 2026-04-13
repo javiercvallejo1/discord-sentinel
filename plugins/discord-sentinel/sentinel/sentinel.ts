@@ -248,10 +248,9 @@ function createClient(botName: string, config: BotConfig): Client {
     intents: [
       GatewayIntentBits.DirectMessages,
       GatewayIntentBits.Guilds,
-      GatewayIntentBits.GuildPresences,
       GatewayIntentBits.MessageContent,
     ],
-    partials: [Partials.Channel],
+    partials: [Partials.Channel, Partials.Message],
     presence: {
       status: 'idle',
       activities: [{ name: 'Idle — DM to start session', type: ActivityType.Watching }],

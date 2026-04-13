@@ -48,9 +48,36 @@ If yes, note that the approval env vars will be set in the spawn wrapper. The us
 
 ## Step 5: Register
 
-Add the bot to `bots.json`:
+Register the bot using the CLI script:
 ```bash
 ~/.claude/discord-sentinel/add-bot "<name>" "<token>" "<project-dir>"
+```
+
+**If the add-bot script is missing**, write the entry directly to bots.json using jq. The schema for each bot entry is:
+
+```json
+{
+  "<bot-name>": {
+    "token": "<discord-bot-token>",
+    "project": "<absolute-path-to-project-dir>",
+    "label": "<display-name>"
+  }
+}
+```
+
+Required fields:
+- `token` (string) — Discord bot token
+- `label` (string) — display name for the bot (usually same as the bot name)
+
+Optional fields:
+- `project` (string) — absolute path to project directory. If omitted, uses `_config.default_project`
+
+Example jq command to add directly:
+```bash
+jq --arg name "<name>" --arg token "<token>" --arg project "<dir>" --arg label "<name>" \
+  '.[$name] = {token: $token, project: $project, label: $label}' \
+  ~/.claude/discord-sentinel/bots.json > /tmp/bots.tmp \
+  && mv /tmp/bots.tmp ~/.claude/discord-sentinel/bots.json
 ```
 
 The sentinel watches bots.json and will automatically:

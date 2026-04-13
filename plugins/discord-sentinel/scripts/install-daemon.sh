@@ -40,6 +40,11 @@ cp "${PLUGIN_ROOT}/package.json" "${SENTINEL_DIR}/package.json"
 cp "${PLUGIN_ROOT}/scripts/discord-approve.sh" "${SENTINEL_DIR}/discord-approve.sh"
 chmod +x "${SENTINEL_DIR}/discord-approve.sh"
 
+# Copy bot management scripts
+cp "${PLUGIN_ROOT}/scripts/add-bot.sh" "${SENTINEL_DIR}/add-bot"
+cp "${PLUGIN_ROOT}/scripts/remove-bot.sh" "${SENTINEL_DIR}/remove-bot"
+chmod +x "${SENTINEL_DIR}/add-bot" "${SENTINEL_DIR}/remove-bot"
+
 # ── Initialize bots.json if it doesn't exist ────────────────────────────────
 if [ ! -f "${SENTINEL_DIR}/bots.json" ]; then
   cat > "${SENTINEL_DIR}/bots.json" <<'BOTS'

@@ -30,7 +30,11 @@ TOKEN="$2"
 PROJECT="${3:-}"
 LABEL="${NAME}"
 
-# Validate name
+# Validate name — alphanumeric, hyphens, and underscores only (no shell metacharacters)
+if [[ ! "$NAME" =~ ^[a-zA-Z][a-zA-Z0-9_-]*$ ]]; then
+  echo "Error: bot name must start with a letter and contain only letters, numbers, hyphens, or underscores"
+  exit 1
+fi
 if [[ "$NAME" == _* ]]; then
   echo "Error: bot name cannot start with underscore (reserved for config)"
   exit 1

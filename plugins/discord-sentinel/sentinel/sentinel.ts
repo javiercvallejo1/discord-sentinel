@@ -50,6 +50,7 @@ interface BotConfig {
   token: string
   project?: string
   label: string
+  approval_channel?: string
 }
 
 interface PoolConfig {
@@ -177,16 +178,29 @@ function spawnSession(botName: string, config: BotConfig): number | null {
     if (existsSync(p)) { claudeBin = p; break }
   }
 
-  // Generate spawn wrapper with bot name env var for personality injection
+  // Generate spawn wrapper with env vars for personality + approval
   const wrapperScript = join(LOCKS_DIR, `spawn-${botName}.sh`)
-  writeFileSync(wrapperScript, [
+  const wrapperLines = [
     '#!/bin/bash',
     `export DISCORD_BOT_TOKEN='${config.token}'`,
     `export DISCORD_BOT_NAME='${botName}'`,
     `export DISCORD_STATE_DIR='${channelDir}'`,
+  ]
+
+  // Set approval hook env vars if approval_channel is configured
+  if (config.approval_channel) {
+    wrapperLines.push(
+      `export DISCORD_APPROVE_BOT_TOKEN='${config.token}'`,
+      `export DISCORD_APPROVE_CHANNEL_ID='${config.approval_channel}'`,
+      `export DISCORD_APPROVE_USER_ID='${poolConfig.owner_id}'`,
+    )
+  }
+
+  wrapperLines.push(
     `cd '${project}'`,
     `exec '${claudeBin}' --channels plugin:discord@claude-plugins-official --dangerously-skip-permissions`,
-  ].join('\n'), { mode: 0o700 })
+  )
+  writeFileSync(wrapperScript, wrapperLines.join('\n'), { mode: 0o700 })
 
   try {
     execSync(`screen -dmS ${screenName} '${wrapperScript}'`, { timeout: 10000 })
@@ -446,35 +460,22 @@ async function syncBots() {
 }
 
 // ── Watch bots.json for changes ────────────────────────────────────────────────
+// Watch the DIRECTORY instead of the file. On macOS, fs.watch watches the inode,
+// not the path. When jq/mv atomically replaces bots.json, the old inode is deleted
+// and the file watcher goes deaf. Watching the directory catches all changes
+// including atomic replacements.
 let reloadDebounce: ReturnType<typeof setTimeout> | null = null
 
 function watchRegistry() {
-  if (!existsSync(BOTS_FILE)) {
-    watch(SENTINEL_DIR, (_, filename) => {
-      if (filename === 'bots.json') {
-        if (reloadDebounce) clearTimeout(reloadDebounce)
-        reloadDebounce = setTimeout(() => {
-          log('bots.json created — loading')
-          syncBots().catch(err => log(`Load error: ${err.message}`))
-          watchBotsFile()
-        }, 500)
-      }
-    })
-    return
-  }
-  watchBotsFile()
-}
-
-function watchBotsFile() {
-  try {
-    watch(BOTS_FILE, () => {
+  watch(SENTINEL_DIR, (_, filename) => {
+    if (filename === 'bots.json') {
       if (reloadDebounce) clearTimeout(reloadDebounce)
       reloadDebounce = setTimeout(() => {
         log('bots.json changed — reloading')
         syncBots().catch(err => log(`Reload error: ${err.message}`))
       }, 500)
-    })
-  } catch {}
+    }
+  })
 }
 
 // ── Graceful shutdown ──────────────────────────────────────────────────────────

@@ -108,7 +108,7 @@ The sentinel daemon runs as a macOS LaunchAgent, keeping bots online 24/7. When 
 
 ```bash
 # Remove launchd service and daemon files
-bash ~/.claude/discord-sentinel/scripts/uninstall-daemon.sh
+~/.claude/discord-sentinel/uninstall
 
 # Remove the plugin and marketplace
 claude plugin uninstall discord-sentinel

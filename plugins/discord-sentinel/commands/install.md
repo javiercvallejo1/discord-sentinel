@@ -45,12 +45,12 @@ This copies sentinel files to `~/.claude/discord-sentinel/`, installs dependenci
 Ask the user for their Discord user ID:
 > "What's your Discord user ID? (Enable Developer Mode in Discord → right-click your name → Copy User ID)"
 
-Then update bots.json:
-```bash
-jq --arg id "<USER_ID>" '._config.owner_id = $id' ~/.claude/discord-sentinel/bots.json > /tmp/bots.tmp && mv /tmp/bots.tmp ~/.claude/discord-sentinel/bots.json
-```
+Also ask for their default project directory (suggest the current working directory).
 
-Also set the default project directory (suggest the current working directory).
+Then update bots.json with both values:
+```bash
+jq --arg id "<USER_ID>" --arg project "<PROJECT_DIR>" '._config.owner_id = $id | ._config.default_project = $project' ~/.claude/discord-sentinel/bots.json > /tmp/bots.tmp && mv /tmp/bots.tmp ~/.claude/discord-sentinel/bots.json
+```
 
 ## Step 5: Add first bot
 

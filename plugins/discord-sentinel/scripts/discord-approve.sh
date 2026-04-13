@@ -73,12 +73,12 @@ case "$TOOL_NAME" in
     ;;
 esac
 
-MESSAGE_BODY=$(cat <<EOF
-{
-  "content": "**Approval Required**\n\n${DISPLAY}\n\nReact thumbs up to **approve** or thumbs down to **reject**\nAuto-rejects in ${TIMEOUT}s"
-}
-EOF
-)
+MESSAGE_BODY=$(jq -n --arg content "**Approval Required**
+
+${DISPLAY}
+
+React thumbs up to **approve** or thumbs down to **reject**
+Auto-rejects in ${TIMEOUT}s" '{content: $content}')
 
 # ── Send the approval request ───────────────────────────────────────────────
 API="https://discord.com/api/v10"
@@ -116,7 +116,9 @@ while [ "$ELAPSED" -lt "$TIMEOUT" ]; do
   if echo "$THUMBS_UP" | jq -e ".[] | select(.id == \"${USER_ID}\")" > /dev/null 2>&1; then
     curl -s -X PATCH "${API}/channels/${CHANNEL_ID}/messages/${MESSAGE_ID}" \
       -H "$AUTH" -H "Content-Type: application/json" \
-      -d "{\"content\": \"**Approved**\n\n${DISPLAY}\"}" > /dev/null 2>&1
+      -d "$(jq -n --arg content "**Approved**
+
+${DISPLAY}" '{content: $content}')" > /dev/null 2>&1
     exit 0
   fi
 
@@ -126,7 +128,9 @@ while [ "$ELAPSED" -lt "$TIMEOUT" ]; do
   if echo "$THUMBS_DOWN" | jq -e ".[] | select(.id == \"${USER_ID}\")" > /dev/null 2>&1; then
     curl -s -X PATCH "${API}/channels/${CHANNEL_ID}/messages/${MESSAGE_ID}" \
       -H "$AUTH" -H "Content-Type: application/json" \
-      -d "{\"content\": \"**Rejected**\n\n${DISPLAY}\"}" > /dev/null 2>&1
+      -d "$(jq -n --arg content "**Rejected**
+
+${DISPLAY}" '{content: $content}')" > /dev/null 2>&1
     echo "Command rejected by user via Discord"
     exit 2
   fi
@@ -134,7 +138,9 @@ done
 
 curl -s -X PATCH "${API}/channels/${CHANNEL_ID}/messages/${MESSAGE_ID}" \
   -H "$AUTH" -H "Content-Type: application/json" \
-  -d "{\"content\": \"**Timed out** (${TIMEOUT}s)\n\n${DISPLAY}\"}" > /dev/null 2>&1
+  -d "$(jq -n --arg content "**Timed out** (${TIMEOUT}s)
+
+${DISPLAY}" '{content: $content}')" > /dev/null 2>&1
 
 echo "Approval timed out after ${TIMEOUT}s"
 exit 2

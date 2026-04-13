@@ -159,7 +159,7 @@ function removeLock(botName: string) {
 }
 
 // ── Session spawning ───────────────────────────────────────────────────────────
-function spawnSession(botName: string, config: BotConfig): number | null {
+async function spawnSession(botName: string, config: BotConfig): Promise<number | null> {
   const project = config.project || poolConfig.default_project
   const channelDir = join(CHANNELS_DIR, `discord-${botName}`)
   const screenName = `claude-${botName}`
@@ -178,27 +178,30 @@ function spawnSession(botName: string, config: BotConfig): number | null {
     if (existsSync(p)) { claudeBin = p; break }
   }
 
+  // Escape single quotes for safe shell interpolation
+  const sq = (s: string) => s.replace(/'/g, "'\\''")
+
   // Generate spawn wrapper with env vars for personality + approval
   const wrapperScript = join(LOCKS_DIR, `spawn-${botName}.sh`)
   const wrapperLines = [
     '#!/bin/bash',
-    `export DISCORD_BOT_TOKEN='${config.token}'`,
-    `export DISCORD_BOT_NAME='${botName}'`,
-    `export DISCORD_STATE_DIR='${channelDir}'`,
+    `export DISCORD_BOT_TOKEN='${sq(config.token)}'`,
+    `export DISCORD_BOT_NAME='${sq(botName)}'`,
+    `export DISCORD_STATE_DIR='${sq(channelDir)}'`,
   ]
 
   // Set approval hook env vars if approval_channel is configured
   if (config.approval_channel) {
     wrapperLines.push(
-      `export DISCORD_APPROVE_BOT_TOKEN='${config.token}'`,
-      `export DISCORD_APPROVE_CHANNEL_ID='${config.approval_channel}'`,
-      `export DISCORD_APPROVE_USER_ID='${poolConfig.owner_id}'`,
+      `export DISCORD_APPROVE_BOT_TOKEN='${sq(config.token)}'`,
+      `export DISCORD_APPROVE_CHANNEL_ID='${sq(config.approval_channel)}'`,
+      `export DISCORD_APPROVE_USER_ID='${sq(poolConfig.owner_id)}'`,
     )
   }
 
   wrapperLines.push(
-    `cd '${project}'`,
-    `exec '${claudeBin}' --channels plugin:discord@claude-plugins-official --dangerously-skip-permissions`,
+    `cd '${sq(project)}'`,
+    `exec '${sq(claudeBin)}' --channels plugin:discord@claude-plugins-official --dangerously-skip-permissions`,
   )
   writeFileSync(wrapperScript, wrapperLines.join('\n'), { mode: 0o700 })
 
@@ -209,10 +212,10 @@ function spawnSession(botName: string, config: BotConfig): number | null {
     // Find the claude PID
     let pid: number | null = null
     for (let i = 0; i < 15; i++) {
-      Bun.sleepSync(500)
+      await new Promise(r => setTimeout(r, 500))
       try {
         const screenPid = execSync(
-          `screen -ls | grep "${screenName}" | awk -F. '{print $1}' | tr -d '\\t '`,
+          `screen -ls | grep "\\.${screenName}\\b" | awk -F. '{print $1}' | tr -d '\\t ' | head -1`,
           { encoding: 'utf8' }
         ).trim()
         if (!screenPid) continue
@@ -235,7 +238,7 @@ function spawnSession(botName: string, config: BotConfig): number | null {
       log(`[${botName}] Could not detect Claude PID — checking screen session`)
       try {
         const screenPid = execSync(
-          `screen -ls | grep "${screenName}" | awk -F. '{print $1}' | tr -d '\\t '`,
+          `screen -ls | grep "\\.${screenName}\\b" | awk -F. '{print $1}' | tr -d '\\t ' | head -1`,
           { encoding: 'utf8' }
         ).trim()
         if (screenPid) {
@@ -324,7 +327,7 @@ function createClient(botName: string, config: BotConfig): Client {
 }
 
 async function connectBot(botName: string, state: BotState): Promise<void> {
-  if (state.status === 'connecting' || state.status === 'disconnecting' || state.status === 'spawning') return
+  if (state.status === 'connecting' || state.status === 'disconnecting' || state.status === 'spawning' || state.status === 'errored') return
 
   if (isSessionActive(botName)) {
     log(`[${botName}] Active session detected — staying disconnected`)

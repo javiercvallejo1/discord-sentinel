@@ -44,7 +44,8 @@ chmod +x "${SENTINEL_DIR}/discord-approve.sh"
 cp "${PLUGIN_ROOT}/scripts/add-bot.sh" "${SENTINEL_DIR}/add-bot"
 cp "${PLUGIN_ROOT}/scripts/remove-bot.sh" "${SENTINEL_DIR}/remove-bot"
 cp "${PLUGIN_ROOT}/scripts/uninstall-daemon.sh" "${SENTINEL_DIR}/uninstall"
-chmod +x "${SENTINEL_DIR}/add-bot" "${SENTINEL_DIR}/remove-bot" "${SENTINEL_DIR}/uninstall"
+cp "${PLUGIN_ROOT}/scripts/session-start-hook.sh" "${SENTINEL_DIR}/session-start-hook.sh"
+chmod +x "${SENTINEL_DIR}/add-bot" "${SENTINEL_DIR}/remove-bot" "${SENTINEL_DIR}/uninstall" "${SENTINEL_DIR}/session-start-hook.sh"
 
 # ── Initialize bots.json if it doesn't exist ────────────────────────────────
 if [ ! -f "${SENTINEL_DIR}/bots.json" ]; then

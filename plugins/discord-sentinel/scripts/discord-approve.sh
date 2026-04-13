@@ -62,11 +62,11 @@ case "$TOOL_NAME" in
     if [ ${#CMD} -gt 500 ]; then
       CMD="${CMD:0:500}..."
     fi
-    DISPLAY="**Tool:** \`Bash\`\n**Command:**\n\`\`\`\n${CMD}\n\`\`\`"
+    DISPLAY=$'**Tool:** `Bash`\n**Command:**\n```\n'"${CMD}"$'\n```'
     ;;
   Write)
     FILE=$(echo "$TOOL_INPUT" | jq -r '.file_path // ""')
-    DISPLAY="**Tool:** \`Write\`\n**File:** \`${FILE}\`"
+    DISPLAY=$'**Tool:** `Write`\n**File:** `'"${FILE}"'`'
     ;;
   *)
     DISPLAY="**Tool:** \`${TOOL_NAME}\`"

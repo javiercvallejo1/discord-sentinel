@@ -3,8 +3,8 @@
 # session-start-hook.sh — Injects bot personality on session start.
 #
 # Reads the bot's personality file and outputs it to stdout so Claude
-# receives it as session context. If the remember plugin is installed,
-# copies the personality to remember's identity.md location instead.
+# receives it as session context. Always uses stdout injection — this
+# works reliably regardless of whether the remember plugin is installed.
 
 SENTINEL_DIR="${HOME}/.claude/discord-sentinel"
 PERSONALITIES_DIR="${SENTINEL_DIR}/personalities"
@@ -34,28 +34,7 @@ if [ ! -f "$PERSONALITY_FILE" ]; then
   exit 0
 fi
 
-# Resolve project directory from bots.json (don't rely on $PWD)
-PROJECT_DIR=""
-if [ -f "$BOTS_FILE" ]; then
-  PROJECT_DIR=$(jq -r --arg name "$BOT_NAME" '.[$name].project // ._config.default_project // ""' "$BOTS_FILE" 2>/dev/null)
-fi
-if [ -z "$PROJECT_DIR" ]; then
-  PROJECT_DIR="$PWD"
-fi
-
-# Check if remember plugin is installed
-if [ -d "${HOME}/.claude/plugins" ]; then
-  REMEMBER_DIR=$(find "${HOME}/.claude/plugins/cache" -maxdepth 3 -name "remember" -type d 2>/dev/null | head -1)
-  if [ -n "$REMEMBER_DIR" ]; then
-    # Remember plugin found — copy personality as identity.md in the project
-    REMEMBER_IDENTITY_DIR="${PROJECT_DIR}/.claude/remember"
-    mkdir -p "$REMEMBER_IDENTITY_DIR"
-    cp "$PERSONALITY_FILE" "${REMEMBER_IDENTITY_DIR}/identity.md"
-    exit 0
-  fi
-fi
-
-# No remember plugin — inject personality directly via stdout
+# Inject personality directly via stdout into session context
 echo "=== BOT IDENTITY ==="
 echo ""
 cat "$PERSONALITY_FILE"

@@ -315,34 +315,21 @@ function createClient(botName: string, config: BotConfig): Client {
       )
       log(`[${botName}] DM from ${data.author.username} — spawning session`)
 
-      // Set presence to "online" before disconnecting. Discord preserves
-      // the last presence until a new gateway connection overrides it, so
-      // the bot stays visibly online while Claude's session is active.
-      // Wait briefly for the websocket to flush the presence update before
-      // destroying the connection.
-      if (state.client?.user) {
-        state.client.user.setPresence({
-          status: 'online',
-          activities: [{ name: `Active session`, type: ActivityType.Playing }],
-        })
-        await new Promise(r => setTimeout(r, 1000))
-      }
-
-      // IMPORTANT: Disconnect from gateway BEFORE spawning Claude.
-      // Discord only allows one gateway connection per token. If the sentinel
-      // holds the gateway while Claude's discord plugin tries to connect,
-      // the plugin either gets rejected or kicks the sentinel — both break.
-      await disconnectBot(botName, state)
-
+      // Spawn Claude first. The discord plugin will connect to the gateway
+      // with the same token, which kicks the sentinel's connection off
+      // automatically (Discord only allows one connection per token — newer
+      // wins). The plugin connects with default "online" presence, so the
+      // bot visibly switches from idle to online.
       const pid = await spawnSession(botName, config)
 
       if (pid) {
         createLock(botName, pid)
+        // Clean up the sentinel's now-dead connection
+        await disconnectBot(botName, state)
         state.status = 'active'
       } else {
-        // Spawn failed — reclaim the gateway
-        log(`[${botName}] Spawn failed — reclaiming gateway`)
-        await connectBot(botName, state)
+        await msg.reply('Failed to start session. Check sentinel logs.')
+        state.status = 'idle'
       }
     } catch (err: any) {
       log(`[${botName}] Spawn error: ${err.message}`)

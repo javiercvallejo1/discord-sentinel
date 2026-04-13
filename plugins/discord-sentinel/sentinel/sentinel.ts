@@ -312,6 +312,16 @@ function createClient(botName: string, config: BotConfig): Client {
       )
       log(`[${botName}] DM from ${data.author.username} — spawning session`)
 
+      // Set presence to "online" before disconnecting. Discord preserves
+      // the last presence until a new gateway connection overrides it, so
+      // the bot stays visibly online while Claude's session is active.
+      if (state.client?.user) {
+        state.client.user.setPresence({
+          status: 'online',
+          activities: [{ name: `Active session`, type: ActivityType.Playing }],
+        })
+      }
+
       // IMPORTANT: Disconnect from gateway BEFORE spawning Claude.
       // Discord only allows one gateway connection per token. If the sentinel
       // holds the gateway while Claude's discord plugin tries to connect,

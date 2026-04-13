@@ -18,6 +18,7 @@ import {
   ActivityType,
   Client,
   GatewayIntentBits,
+  GatewayDispatchEvents,
   Partials,
   ChannelType,
 } from 'discord.js'
@@ -282,10 +283,13 @@ function createClient(botName: string, config: BotConfig): Client {
     })
   })
 
-  client.on('messageCreate', async msg => {
-    if (msg.author.bot) return
-    if (msg.channel.type !== ChannelType.DM) return
-    if (poolConfig.owner_id && msg.author.id !== poolConfig.owner_id) return
+  // discord.js v14 silently drops DM messageCreate events due to a partial
+  // channel resolution bug. Use the raw websocket handler instead, then fetch
+  // the full Message object from the API.
+  client.ws.on(GatewayDispatchEvents.MessageCreate, async (data: any) => {
+    if (data.author?.bot) return
+    if (data.channel_type !== undefined && data.channel_type !== 1) return // 1 = DM
+    if (poolConfig.owner_id && data.author?.id !== poolConfig.owner_id) return
 
     const state = bots.get(botName)
     if (!state || state.status !== 'idle') return
@@ -298,12 +302,17 @@ function createClient(botName: string, config: BotConfig): Client {
     state.status = 'spawning'
 
     try {
+      // Fetch full channel and message so we can reply
+      const channel = await client.channels.fetch(data.channel_id)
+      if (!channel || !('messages' in channel)) { state.status = 'idle'; return }
+      const msg = await (channel as any).messages.fetch(data.id)
+
       await msg.reply(
         `Starting session for **${config.label}**... send your request in a moment.`
       )
-      log(`[${botName}] DM from ${msg.author.tag} — spawning session`)
+      log(`[${botName}] DM from ${data.author.username} — spawning session`)
 
-      const pid = spawnSession(botName, config)
+      const pid = await spawnSession(botName, config)
 
       if (pid) {
         createLock(botName, pid)

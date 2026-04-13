@@ -1,0 +1,7 @@
+#!/bin/bash
+# Auto-generated spawn wrapper for bot: {{BOT_NAME}}
+export DISCORD_BOT_TOKEN='{{BOT_TOKEN}}'
+export DISCORD_BOT_NAME='{{BOT_NAME}}'
+export DISCORD_STATE_DIR='{{CHANNEL_DIR}}'
+cd '{{PROJECT}}'
+exec '{{CLAUDE_BIN}}' --channels plugin:discord@claude-plugins-official --dangerously-skip-permissions

@@ -1,0 +1,12 @@
+{
+  "name": "discord-sentinel",
+  "version": "1.0.0",
+  "description": "Discord bot pool manager for Claude Code",
+  "type": "module",
+  "scripts": {
+    "start": "bun sentinel/sentinel.ts"
+  },
+  "dependencies": {
+    "discord.js": "^14.14.0"
+  }
+}

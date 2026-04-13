@@ -21,21 +21,29 @@ A Claude Code plugin that manages a pool of Discord bots as gateways to Claude C
 
 ## Install
 
+**Step 1 — Add the marketplace:**
+
 ```bash
-claude plugins add github:javiercvallejo/discord-sentinel
+claude plugin marketplace add javiercvallejo1/discord-sentinel
 ```
 
-Then run the setup wizard:
+**Step 2 — Install the plugin:**
+
+```bash
+claude plugin install discord-sentinel
+```
+
+**Step 3 — Run the setup wizard** (inside a Claude Code session):
 
 ```
 /install
 ```
 
-This will:
-1. Check prerequisites
-2. Optionally install the remember plugin for bot memory
-3. Install the sentinel daemon
-4. Set up the launchd service (auto-starts on login)
+The wizard will:
+1. Check prerequisites (bun, claude, jq, screen)
+2. Optionally install the [remember](https://github.com/Digital-Process-Tools/claude-remember) plugin for persistent bot memory
+3. Install the sentinel daemon to `~/.claude/discord-sentinel/`
+4. Set up the macOS launchd service (auto-starts on login)
 5. Guide you through adding your first bot
 
 ## Usage
@@ -102,6 +110,7 @@ The sentinel daemon runs as a macOS LaunchAgent, keeping bots online 24/7. When 
 # Remove launchd service and daemon files
 bash ~/.claude/discord-sentinel/scripts/uninstall-daemon.sh
 
-# Remove the plugin
-claude plugins remove discord-sentinel
+# Remove the plugin and marketplace
+claude plugin uninstall discord-sentinel
+claude plugin marketplace remove discord-sentinel
 ```

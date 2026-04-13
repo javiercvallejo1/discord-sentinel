@@ -1,0 +1,14 @@
+{
+  "name": "discord-sentinel",
+  "owner": {
+    "name": "Javier Vallejo"
+  },
+  "plugins": [
+    {
+      "name": "discord-sentinel",
+      "description": "Discord bot pool manager with per-bot personality, memory integration, auto-spawn sessions on DM, and approval hook for dangerous commands",
+      "category": "productivity",
+      "source": "./plugins/discord-sentinel"
+    }
+  ]
+}

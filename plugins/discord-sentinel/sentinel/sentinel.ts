@@ -315,21 +315,23 @@ function createClient(botName: string, config: BotConfig): Client {
       )
       log(`[${botName}] DM from ${data.author.username} — spawning session`)
 
-      // Spawn Claude first. The discord plugin will connect to the gateway
-      // with the same token, which kicks the sentinel's connection off
-      // automatically (Discord only allows one connection per token — newer
-      // wins). The plugin connects with default "online" presence, so the
-      // bot visibly switches from idle to online.
+      // MUST disconnect BEFORE spawning. With async sleep (non-blocking),
+      // discord.js processes "kicked off" events and auto-reconnects, creating
+      // a reconnection war with Claude's discord plugin. Disconnecting first
+      // (client.destroy()) prevents auto-reconnect entirely.
+      // The working hand-built version avoided this because Bun.sleepSync
+      // blocked the event loop, preventing discord.js from reconnecting.
+      await disconnectBot(botName, state)
+
       const pid = await spawnSession(botName, config)
 
       if (pid) {
         createLock(botName, pid)
-        // Clean up the sentinel's now-dead connection
-        await disconnectBot(botName, state)
         state.status = 'active'
       } else {
-        await msg.reply('Failed to start session. Check sentinel logs.')
-        state.status = 'idle'
+        // Spawn failed — reclaim the gateway
+        log(`[${botName}] Spawn failed — reclaiming gateway`)
+        await connectBot(botName, state)
       }
     } catch (err: any) {
       log(`[${botName}] Spawn error: ${err.message}`)

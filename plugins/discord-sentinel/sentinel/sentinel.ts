@@ -246,7 +246,7 @@ async function spawnSession(botName: string, config: BotConfig): Promise<number 
   writeFileSync(wrapperScript, wrapperLines.join('\n'), { mode: 0o700 })
 
   try {
-    execSync(`screen -dmS ${screenName} '${wrapperScript}'`, { timeout: 10000 })
+    execSync(`screen -dmS '${screenName}' '${wrapperScript}'`, { timeout: 10000 })
     log(`[${botName}] Screen session '${screenName}' spawned`)
 
     // Find the claude PID
@@ -358,6 +358,7 @@ function createClient(botName: string, config: BotConfig): Client {
       // The working hand-built version avoided this because Bun.sleepSync
       // blocked the event loop, preventing discord.js from reconnecting.
       await disconnectBot(botName, state)
+      state.status = 'spawning' // Re-set after disconnectBot resets to 'idle'
 
       const pid = await spawnSession(botName, config)
 
@@ -383,7 +384,7 @@ function createClient(botName: string, config: BotConfig): Client {
 }
 
 async function connectBot(botName: string, state: BotState): Promise<void> {
-  if (state.status === 'connecting' || state.status === 'disconnecting' || state.status === 'spawning' || state.status === 'errored') return
+  if (state.status === 'connecting' || state.status === 'disconnecting' || state.status === 'spawning' || state.status === 'active' || state.status === 'errored') return
 
   if (isSessionActive(botName)) {
     log(`[${botName}] Active session detected — staying disconnected`)
@@ -409,7 +410,10 @@ async function connectBot(botName: string, state: BotState): Promise<void> {
     const delay = delays[Math.min(state.retryCount - 1, delays.length - 1)]
     log(`[${botName}] Login failed (attempt ${state.retryCount}): ${err.message} — retry in ${delay / 1000}s`)
 
-    state.retryTimer = setTimeout(() => connectBot(botName, state), delay)
+    state.retryTimer = setTimeout(() => {
+      state.status = 'idle' // Reset so connectBot's guard doesn't block
+      connectBot(botName, state)
+    }, delay)
   }
 }
 

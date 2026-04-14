@@ -37,6 +37,9 @@ if [ -f "$PERSONALITY_FILE" ]; then
   echo "=== SESSION INSTRUCTIONS ==="
   echo "You are running as a Discord bot named '${BOT_NAME}'. A user just DM'd you to start this session."
   echo "Send a short ready message to let them know you're online and ready. Keep it brief — one or two sentences, in character with your identity above."
+  echo ""
+  echo "IMPORTANT: If the user sends '/sleep', immediately reply with a short goodbye message in character, then exit the session by running: kill \$PPID"
+  echo "This gracefully ends the session so the sentinel can reclaim the bot."
   echo "=== END SESSION INSTRUCTIONS ==="
 else
   # No personality — first-run setup
@@ -56,5 +59,8 @@ else
   echo "- Behavioral guidelines (what to do and not do)"
   echo ""
   echo "After saving, confirm to the user and then continue the session in character."
+  echo ""
+  echo "IMPORTANT: If the user sends '/sleep', immediately reply with a short goodbye message, then exit the session by running: kill \$PPID"
+  echo "This gracefully ends the session so the sentinel can reclaim the bot."
   echo "=== END SESSION INSTRUCTIONS ==="
 fi

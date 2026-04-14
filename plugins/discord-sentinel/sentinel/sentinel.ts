@@ -204,7 +204,7 @@ async function spawnSession(botName: string, config: BotConfig): Promise<number 
 
   wrapperLines.push(
     `cd '${sq(project)}'`,
-    `exec '${sq(claudeBin)}' --channels plugin:discord@claude-plugins-official --dangerously-skip-permissions`,
+    `exec '${sq(claudeBin)}' --channels plugin:discord@claude-plugins-official --dangerously-skip-permissions --continue`,
   )
   writeFileSync(wrapperScript, wrapperLines.join('\n'), { mode: 0o700 })
 

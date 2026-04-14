@@ -190,6 +190,7 @@ async function spawnSession(botName: string, config: BotConfig): Promise<number 
     `export DISCORD_BOT_TOKEN='${sq(config.token)}'`,
     `export DISCORD_BOT_NAME='${sq(botName)}'`,
     `export DISCORD_STATE_DIR='${sq(channelDir)}'`,
+    `export CLAUDE_PROJECT_DIR='${sq(project)}'`,
   ]
 
   // Set approval hook env vars if approval_channel is configured

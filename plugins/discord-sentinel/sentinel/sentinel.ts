@@ -87,6 +87,43 @@ function log(msg: string) {
   } catch {}
 }
 
+// ── Health notifications ───────────────────────────────────────────────────────
+/**
+ * Sends a DM to the owner via the first available bot's token.
+ * Used for health notifications (sentinel start, crash recovery).
+ */
+async function notifyOwner(message: string) {
+  if (!poolConfig.owner_id) return
+
+  // Find the first bot with a token to send the notification
+  const { bots: registry } = loadBots()
+  const firstBot = Object.values(registry)[0]
+  if (!firstBot) return
+
+  try {
+    const API = 'https://discord.com/api/v10'
+    const AUTH = `Bot ${firstBot.token}`
+
+    // Open DM channel with owner
+    const dmRes = await fetch(`${API}/users/@me/channels`, {
+      method: 'POST',
+      headers: { Authorization: AUTH, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ recipient_id: poolConfig.owner_id }),
+    })
+    const dm = await dmRes.json() as any
+    if (!dm.id) return
+
+    // Send notification
+    await fetch(`${API}/channels/${dm.id}/messages`, {
+      method: 'POST',
+      headers: { Authorization: AUTH, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: message }),
+    })
+  } catch (err: any) {
+    log(`Health notification failed: ${err.message}`)
+  }
+}
+
 // ── Channel auto-provisioning ──────────────────────────────────────────────────
 function provisionChannel(botName: string, config: BotConfig) {
   const channelDir = join(CHANNELS_DIR, `discord-${botName}`)
@@ -518,3 +555,6 @@ log('Discord Sentinel starting...')
 await syncBots()
 watchRegistry()
 log(`Sentinel running — managing ${bots.size} bot(s), owner: ${poolConfig.owner_id || 'any'}`)
+
+// Notify owner on startup (useful for crash recovery detection via launchd KeepAlive)
+notifyOwner(`Sentinel started — managing ${bots.size} bot(s)`).catch(() => {})

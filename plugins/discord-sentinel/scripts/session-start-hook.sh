@@ -1,10 +1,10 @@
 #!/bin/bash
 #
-# session-start-hook.sh — Injects bot personality on session start.
+# session-start-hook.sh — Injects bot personality and ready instruction on session start.
 #
 # Reads the bot's personality file and outputs it to stdout so Claude
-# receives it as session context. Always uses stdout injection — this
-# works reliably regardless of whether the remember plugin is installed.
+# receives it as session context. Also instructs Claude to send a ready
+# message so the user knows the session is live.
 
 SENTINEL_DIR="${HOME}/.claude/discord-sentinel"
 PERSONALITIES_DIR="${SENTINEL_DIR}/personalities"
@@ -29,14 +29,18 @@ fi
 
 PERSONALITY_FILE="${PERSONALITIES_DIR}/${BOT_NAME}.md"
 
-# No personality file = nothing to inject
-if [ ! -f "$PERSONALITY_FILE" ]; then
-  exit 0
+# Inject personality if available
+if [ -f "$PERSONALITY_FILE" ]; then
+  echo "=== BOT IDENTITY ==="
+  echo ""
+  cat "$PERSONALITY_FILE"
+  echo ""
+  echo "=== END BOT IDENTITY ==="
+  echo ""
 fi
 
-# Inject personality directly via stdout into session context
-echo "=== BOT IDENTITY ==="
-echo ""
-cat "$PERSONALITY_FILE"
-echo ""
-echo "=== END BOT IDENTITY ==="
+# Instruct Claude to send a ready message via Discord
+echo "=== SESSION INSTRUCTIONS ==="
+echo "You are running as a Discord bot named '${BOT_NAME}'. A user just DM'd you to start this session."
+echo "Send a short ready message to let them know you're online and ready. Keep it brief — one or two sentences, in character with your identity above."
+echo "=== END SESSION INSTRUCTIONS ==="

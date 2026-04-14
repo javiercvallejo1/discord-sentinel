@@ -66,6 +66,9 @@ interface BotState {
   retryCount: number
   retryTimer: ReturnType<typeof setTimeout> | null
   lockCheckTimer: ReturnType<typeof setInterval> | null
+  // For kill-via-reaction: store the "Starting session..." message details
+  spawnMessageId?: string
+  spawnChannelId?: string
 }
 
 // ── State ──────────────────────────────────────────────────────────────────────
@@ -346,9 +349,13 @@ function createClient(botName: string, config: BotConfig): Client {
       if (!channel || !('messages' in channel)) { state.status = 'idle'; return }
       const msg = await (channel as any).messages.fetch(data.id)
 
-      await msg.reply(
-        `Starting session for **${config.label}**... send your request in a moment.`
+      const replyMsg = await msg.reply(
+        `Starting session for **${config.label}**... send your request in a moment.\n\nReact with :octagonal_sign: to kill this session.`
       )
+      // Add stop sign reaction for kill-from-Discord
+      try { await replyMsg.react('\u{1F6D1}') } catch {}
+      state.spawnMessageId = replyMsg.id
+      state.spawnChannelId = data.channel_id
       log(`[${botName}] DM from ${data.author.username} — spawning session`)
 
       // MUST disconnect BEFORE spawning. With async sleep (non-blocking),
@@ -437,6 +444,46 @@ async function disconnectBot(botName: string, state: BotState): Promise<void> {
   state.status = 'idle'
 }
 
+// ── Kill via reaction ──────────────────────────────────────────────────────────
+/**
+ * Checks if the owner reacted with the stop sign on the "Starting session..." message.
+ * Uses REST API since the sentinel is disconnected during active sessions.
+ */
+async function checkKillReaction(botName: string, state: BotState): Promise<boolean> {
+  if (!state.spawnMessageId || !state.spawnChannelId) return false
+
+  try {
+    const API = 'https://discord.com/api/v10'
+    const AUTH = `Bot ${state.config.token}`
+    const stopEmoji = '%F0%9F%9B%91' // 🛑
+
+    const res = await fetch(
+      `${API}/channels/${state.spawnChannelId}/messages/${state.spawnMessageId}/reactions/${stopEmoji}`,
+      { headers: { Authorization: AUTH } }
+    )
+    if (!res.ok) return false
+
+    const users = await res.json() as any[]
+    return users.some((u: any) => u.id === poolConfig.owner_id)
+  } catch {
+    return false
+  }
+}
+
+function killSession(botName: string) {
+  const lockPath = getLockPath(botName)
+  try {
+    const content = readFileSync(lockPath, 'utf8').trim()
+    const pid = parseInt(content, 10)
+    if (!isNaN(pid)) {
+      process.kill(pid, 'SIGTERM')
+      log(`[${botName}] Session killed via Discord reaction`)
+    }
+  } catch {}
+  try { unlinkSync(getLockPath(botName)) } catch {}
+  try { execSync(`screen -S claude-${botName} -X quit 2>/dev/null`) } catch {}
+}
+
 // ── Lock monitoring ────────────────────────────────────────────────────────────
 function startLockMonitor(botName: string, state: BotState) {
   state.lockCheckTimer = setInterval(async () => {
@@ -448,7 +495,16 @@ function startLockMonitor(botName: string, state: BotState) {
       state.status = 'active'
     } else if (!active && state.status === 'active') {
       log(`[${botName}] Session ended — reclaiming gateway (idle mode)`)
+      state.spawnMessageId = undefined
+      state.spawnChannelId = undefined
       await connectBot(botName, state)
+    } else if (active && state.status === 'active') {
+      // Check for kill reaction while session is running
+      const shouldKill = await checkKillReaction(botName, state)
+      if (shouldKill) {
+        killSession(botName)
+        // Lock monitor will detect dead PID on next tick and reconnect
+      }
     }
   }, 3000)
 }

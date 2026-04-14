@@ -52,6 +52,7 @@ interface BotConfig {
   project?: string
   label: string
   approval_channel?: string
+  timeout_hours?: number  // Auto-kill after N hours of inactivity (default: 4)
 }
 
 interface PoolConfig {
@@ -66,6 +67,7 @@ interface BotState {
   retryCount: number
   retryTimer: ReturnType<typeof setTimeout> | null
   lockCheckTimer: ReturnType<typeof setInterval> | null
+  sessionStartedAt?: number  // Timestamp when session was spawned
 }
 
 // ── State ──────────────────────────────────────────────────────────────────────
@@ -301,6 +303,10 @@ async function spawnSession(botName: string, config: BotConfig): Promise<number 
 
 // ── Bot management ─────────────────────────────────────────────────────────────
 function createClient(botName: string, config: BotConfig): Client {
+  const project = config.project || poolConfig.default_project
+  const projectName = project.split('/').pop() || project
+  const idleActivity = `Idle — ${projectName} — DM to start`
+
   const client = new Client({
     intents: [
       GatewayIntentBits.DirectMessages,
@@ -310,7 +316,7 @@ function createClient(botName: string, config: BotConfig): Client {
     partials: [Partials.Channel, Partials.Message],
     presence: {
       status: 'idle',
-      activities: [{ name: 'Idle — DM to start session', type: ActivityType.Watching }],
+      activities: [{ name: idleActivity, type: ActivityType.Watching }],
     },
   })
 
@@ -318,7 +324,7 @@ function createClient(botName: string, config: BotConfig): Client {
     log(`[${botName}] Connected as ${c.user.tag} — idle mode`)
     c.user.setPresence({
       status: 'idle',
-      activities: [{ name: 'Idle — DM to start session', type: ActivityType.Watching }],
+      activities: [{ name: idleActivity, type: ActivityType.Watching }],
     })
   })
 
@@ -365,6 +371,7 @@ function createClient(botName: string, config: BotConfig): Client {
       if (pid) {
         createLock(botName, pid)
         state.status = 'active'
+        state.sessionStartedAt = Date.now()
       } else {
         // Spawn failed — reclaim the gateway
         log(`[${botName}] Spawn failed — reclaiming gateway`)
@@ -446,9 +453,27 @@ function startLockMonitor(botName: string, state: BotState) {
       log(`[${botName}] Session started — handing off gateway`)
       await disconnectBot(botName, state)
       state.status = 'active'
+      state.sessionStartedAt = Date.now()
     } else if (!active && state.status === 'active') {
       log(`[${botName}] Session ended — reclaiming gateway (idle mode)`)
+      state.sessionStartedAt = undefined
       await connectBot(botName, state)
+    } else if (active && state.status === 'active' && state.sessionStartedAt) {
+      // Check session timeout
+      const timeoutHours = state.config.timeout_hours ?? 4
+      const elapsed = (Date.now() - state.sessionStartedAt) / (1000 * 60 * 60)
+      if (elapsed >= timeoutHours) {
+        log(`[${botName}] Session timed out after ${timeoutHours}h — killing`)
+        // Kill the session
+        try {
+          const content = readFileSync(getLockPath(botName), 'utf8').trim()
+          const pid = parseInt(content, 10)
+          if (!isNaN(pid)) process.kill(pid, 'SIGTERM')
+        } catch {}
+        try { unlinkSync(getLockPath(botName)) } catch {}
+        try { execSync(`screen -S claude-${botName} -X quit 2>/dev/null`) } catch {}
+        // Next tick will detect dead PID and reconnect
+      }
     }
   }, 3000)
 }

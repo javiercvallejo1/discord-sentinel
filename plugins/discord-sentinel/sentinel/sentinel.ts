@@ -430,6 +430,7 @@ async function disconnectBot(botName: string, state: BotState): Promise<void> {
   }
 
   state.client = null
+  state.status = 'idle'
 }
 
 // ── Lock monitoring ────────────────────────────────────────────────────────────

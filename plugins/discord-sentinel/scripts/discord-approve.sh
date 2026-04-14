@@ -73,12 +73,8 @@ case "$TOOL_NAME" in
     ;;
 esac
 
-MESSAGE_BODY=$(jq -n --arg content "**Approval Required**
-
-${DISPLAY}
-
-React thumbs up to **approve** or thumbs down to **reject**
-Auto-rejects in ${TIMEOUT}s" '{content: $content}')
+MESSAGE_BODY=$(jq -n --arg display "$DISPLAY" --arg timeout "$TIMEOUT" \
+  '{content: ("**Approval Required**\n\n" + $display + "\n\nReact thumbs up to **approve** or thumbs down to **reject**\nAuto-rejects in " + $timeout + "s")}')
 
 # ── Send the approval request ───────────────────────────────────────────────
 API="https://discord.com/api/v10"
@@ -116,9 +112,7 @@ while [ "$ELAPSED" -lt "$TIMEOUT" ]; do
   if echo "$THUMBS_UP" | jq -e ".[] | select(.id == \"${USER_ID}\")" > /dev/null 2>&1; then
     curl -s -X PATCH "${API}/channels/${CHANNEL_ID}/messages/${MESSAGE_ID}" \
       -H "$AUTH" -H "Content-Type: application/json" \
-      -d "$(jq -n --arg content "**Approved**
-
-${DISPLAY}" '{content: $content}')" > /dev/null 2>&1
+      -d "$(jq -n --arg display "$DISPLAY" '{content: ("**Approved**\n\n" + $display)}')" > /dev/null 2>&1
     exit 0
   fi
 
@@ -128,9 +122,7 @@ ${DISPLAY}" '{content: $content}')" > /dev/null 2>&1
   if echo "$THUMBS_DOWN" | jq -e ".[] | select(.id == \"${USER_ID}\")" > /dev/null 2>&1; then
     curl -s -X PATCH "${API}/channels/${CHANNEL_ID}/messages/${MESSAGE_ID}" \
       -H "$AUTH" -H "Content-Type: application/json" \
-      -d "$(jq -n --arg content "**Rejected**
-
-${DISPLAY}" '{content: $content}')" > /dev/null 2>&1
+      -d "$(jq -n --arg display "$DISPLAY" '{content: ("**Rejected**\n\n" + $display)}')" > /dev/null 2>&1
     echo "Command rejected by user via Discord"
     exit 2
   fi
@@ -138,9 +130,7 @@ done
 
 curl -s -X PATCH "${API}/channels/${CHANNEL_ID}/messages/${MESSAGE_ID}" \
   -H "$AUTH" -H "Content-Type: application/json" \
-  -d "$(jq -n --arg content "**Timed out** (${TIMEOUT}s)
-
-${DISPLAY}" '{content: $content}')" > /dev/null 2>&1
+  -d "$(jq -n --arg display "$DISPLAY" --arg timeout "$TIMEOUT" '{content: ("**Timed out** (" + $timeout + "s)\n\n" + $display)}')" > /dev/null 2>&1
 
 echo "Approval timed out after ${TIMEOUT}s"
 exit 2

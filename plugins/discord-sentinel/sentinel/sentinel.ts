@@ -186,8 +186,6 @@ async function spawnSession(botName: string, config: BotConfig): Promise<number 
   const wrapperScript = join(LOCKS_DIR, `spawn-${botName}.sh`)
   const wrapperLines = [
     '#!/bin/bash',
-    '# Source shell profile for PATH (screen uses minimal login shell)',
-    '[ -f "$HOME/.zshrc" ] && source "$HOME/.zshrc" 2>/dev/null || [ -f "$HOME/.bashrc" ] && source "$HOME/.bashrc" 2>/dev/null || true',
     'export PATH="$HOME/.bun/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"',
     `export DISCORD_BOT_TOKEN='${sq(config.token)}'`,
     `export DISCORD_BOT_NAME='${sq(botName)}'`,

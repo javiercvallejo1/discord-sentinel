@@ -459,20 +459,20 @@ function startLockMonitor(botName: string, state: BotState) {
       state.sessionStartedAt = undefined
       await connectBot(botName, state)
     } else if (active && state.status === 'active' && state.sessionStartedAt) {
-      // Check session timeout
-      const timeoutHours = state.config.timeout_hours ?? 4
-      const elapsed = (Date.now() - state.sessionStartedAt) / (1000 * 60 * 60)
-      if (elapsed >= timeoutHours) {
-        log(`[${botName}] Session timed out after ${timeoutHours}h — killing`)
-        // Kill the session
-        try {
-          const content = readFileSync(getLockPath(botName), 'utf8').trim()
-          const pid = parseInt(content, 10)
-          if (!isNaN(pid)) process.kill(pid, 'SIGTERM')
-        } catch {}
-        try { unlinkSync(getLockPath(botName)) } catch {}
-        try { execSync(`screen -S claude-${botName} -X quit 2>/dev/null`) } catch {}
-        // Next tick will detect dead PID and reconnect
+      // Check session timeout (opt-in: set timeout_hours in bots.json, 0 = disabled)
+      const timeoutHours = state.config.timeout_hours ?? 0
+      if (timeoutHours > 0) {
+        const elapsed = (Date.now() - state.sessionStartedAt) / (1000 * 60 * 60)
+        if (elapsed >= timeoutHours) {
+          log(`[${botName}] Session timed out after ${timeoutHours}h — killing`)
+          try {
+            const content = readFileSync(getLockPath(botName), 'utf8').trim()
+            const pid = parseInt(content, 10)
+            if (!isNaN(pid)) process.kill(pid, 'SIGTERM')
+          } catch {}
+          try { unlinkSync(getLockPath(botName)) } catch {}
+          try { execSync(`screen -S claude-${botName} -X quit 2>/dev/null`) } catch {}
+        }
       }
     }
   }, 3000)

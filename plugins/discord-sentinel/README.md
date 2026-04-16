@@ -12,14 +12,26 @@ A Claude Code plugin that manages a pool of Discord bots as gateways to Claude C
 - **Memory integration** — works with the [remember](https://github.com/Digital-Process-Tools/claude-remember) plugin for persistent cross-session memory
 - **Approval hook** — dangerous commands (git push, rm -rf) sent to Discord for approval
 - **Health notifications** — get a DM when sentinel starts or recovers from a crash
-- **Always-on** — launchd service keeps bots online even when no session is active
+- **Always-on** — launchd (macOS) or systemd (Linux) keeps bots online even when no session is active
 
 ## Prerequisites
 
-- macOS
+### macOS
 - [Bun](https://bun.sh) runtime (`curl -fsSL https://bun.sh/install | bash`)
 - [Claude Code](https://claude.ai/code) CLI
 - `jq` and `screen` (`brew install jq screen`)
+
+### Linux (systemd-based distros: Ubuntu, Debian, Fedora, Arch, etc.)
+- [Bun](https://bun.sh) runtime (`curl -fsSL https://bun.sh/install | bash`)
+- [Claude Code](https://claude.ai/code) CLI
+- `jq` and `screen`:
+  - Ubuntu/Debian: `sudo apt install jq screen`
+  - Fedora/RHEL: `sudo dnf install jq screen`
+  - Arch: `sudo pacman -S jq screen`
+- systemd with user service support (default on all major distros)
+
+### Windows
+Use [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install) with any supported Linux distribution and follow the Linux instructions inside WSL.
 
 ## Create a Discord Bot
 
@@ -152,7 +164,7 @@ You (Discord DM) → Bot (idle) → Sentinel disconnects from gateway
 Session ends → Sentinel detects dead PID → Reconnects → Bot shows "idle"
 ```
 
-The sentinel daemon runs as a macOS LaunchAgent, keeping bots online 24/7. When you DM a bot:
+The sentinel daemon runs as a service — launchd on macOS, systemd user service on Linux — keeping bots online 24/7. When you DM a bot:
 
 1. Sentinel receives the DM via the Discord gateway
 2. Replies "Starting session..." and disconnects from the gateway
@@ -177,7 +189,8 @@ Sessions resume where they left off (`--continue` flag). If the [remember](https
 | Session locks | `~/.claude/discord-sentinel/locks/` |
 | Logs | `~/.claude/discord-sentinel/logs/` |
 | Channel configs | `~/.claude/channels/discord-<botname>/` |
-| LaunchAgent | `~/Library/LaunchAgents/com.claude.discord-sentinel.plist` |
+| Service (macOS) | `~/Library/LaunchAgents/com.claude.discord-sentinel.plist` |
+| Service (Linux) | `~/.config/systemd/user/claude-discord-sentinel.service` |
 
 ## Troubleshooting
 

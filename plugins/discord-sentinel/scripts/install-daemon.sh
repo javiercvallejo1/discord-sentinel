@@ -1,25 +1,34 @@
 #!/bin/bash
 #
-# install-daemon.sh — Install the sentinel daemon and launchd service.
+# install-daemon.sh — Install the sentinel daemon (macOS launchd or Linux systemd).
 #
 # Usage: install-daemon.sh <plugin-root>
 #
-# Copies sentinel files to ~/.claude/discord-sentinel/,
-# installs dependencies, and sets up the launchd agent.
+# Copies sentinel files to ~/.claude/discord-sentinel/, installs dependencies,
+# and sets up the appropriate service manager (launchd on macOS, systemd on Linux).
 
 set -euo pipefail
 
 PLUGIN_ROOT="${1:-.}"
 SENTINEL_DIR="${HOME}/.claude/discord-sentinel"
-PLIST_DIR="${HOME}/Library/LaunchAgents"
-PLIST_NAME="com.claude.discord-sentinel"
-PLIST_FILE="${PLIST_DIR}/${PLIST_NAME}.plist"
+OS="$(uname -s)"
 
 echo "Installing Discord Sentinel daemon..."
+echo "Detected OS: ${OS}"
 
 # ── Check prerequisites ─────────────────────────────────────────────────────
 if ! command -v bun &>/dev/null; then
   echo "Error: bun is required. Install it: curl -fsSL https://bun.sh/install | bash"
+  exit 1
+fi
+
+if ! command -v jq &>/dev/null; then
+  echo "Error: jq is required. Install it via your package manager (brew install jq / apt install jq / dnf install jq)"
+  exit 1
+fi
+
+if ! command -v screen &>/dev/null; then
+  echo "Error: screen is required. Install it via your package manager (brew install screen / apt install screen / dnf install screen)"
   exit 1
 fi
 
@@ -64,16 +73,22 @@ fi
 echo "Installing dependencies..."
 cd "${SENTINEL_DIR}" && bun install --silent
 
-# ── Unload existing service if present ──────────────────────────────────────
-if launchctl list "${PLIST_NAME}" &>/dev/null; then
-  echo "Stopping existing sentinel service..."
-  launchctl unload "${PLIST_FILE}" 2>/dev/null || true
-fi
+# ── Install service (OS-specific) ───────────────────────────────────────────
+case "${OS}" in
+  Darwin)
+    # macOS — launchd
+    PLIST_DIR="${HOME}/Library/LaunchAgents"
+    PLIST_NAME="com.claude.discord-sentinel"
+    PLIST_FILE="${PLIST_DIR}/${PLIST_NAME}.plist"
 
-# ── Generate launchd plist ──────────────────────────────────────────────────
-mkdir -p "${PLIST_DIR}"
+    # Unload existing service if present
+    if launchctl list "${PLIST_NAME}" &>/dev/null; then
+      echo "Stopping existing sentinel service..."
+      launchctl unload "${PLIST_FILE}" 2>/dev/null || true
+    fi
 
-cat > "${PLIST_FILE}" <<PLIST
+    mkdir -p "${PLIST_DIR}"
+    cat > "${PLIST_FILE}" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -103,14 +118,77 @@ cat > "${PLIST_FILE}" <<PLIST
 </dict>
 </plist>
 PLIST
+    launchctl load "${PLIST_FILE}"
 
-# ── Load the service ────────────────────────────────────────────────────────
-launchctl load "${PLIST_FILE}"
+    echo ""
+    echo "Sentinel daemon installed and running (macOS/launchd)."
+    echo "  Daemon: ${SENTINEL_DIR}/sentinel.ts"
+    echo "  Service: ${PLIST_FILE}"
+    echo "  Logs: ${SENTINEL_DIR}/logs/"
+    ;;
 
-echo ""
-echo "Sentinel daemon installed and running."
-echo "  Daemon: ${SENTINEL_DIR}/sentinel.ts"
-echo "  Service: ${PLIST_FILE}"
-echo "  Logs: ${SENTINEL_DIR}/logs/"
+  Linux)
+    # Linux — systemd user service
+    if ! command -v systemctl &>/dev/null; then
+      echo "Error: systemctl not found. This plugin requires systemd on Linux."
+      echo "Supported distros: Ubuntu, Debian, Fedora, Arch, etc. (anything with systemd)"
+      exit 1
+    fi
+
+    SERVICE_DIR="${HOME}/.config/systemd/user"
+    SERVICE_NAME="claude-discord-sentinel"
+    SERVICE_FILE="${SERVICE_DIR}/${SERVICE_NAME}.service"
+
+    # Stop existing service if present
+    if systemctl --user is-active "${SERVICE_NAME}" &>/dev/null; then
+      echo "Stopping existing sentinel service..."
+      systemctl --user stop "${SERVICE_NAME}" 2>/dev/null || true
+    fi
+
+    mkdir -p "${SERVICE_DIR}"
+    cat > "${SERVICE_FILE}" <<SERVICE
+[Unit]
+Description=Discord Sentinel - Bot pool manager for Claude Code
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=${BUN_PATH} ${SENTINEL_DIR}/sentinel.ts
+WorkingDirectory=${SENTINEL_DIR}
+Restart=always
+RestartSec=5
+Environment="PATH=/usr/local/bin:/usr/bin:/bin:%h/.bun/bin:%h/.local/bin"
+StandardOutput=append:${SENTINEL_DIR}/logs/sentinel-stdout.log
+StandardError=append:${SENTINEL_DIR}/logs/sentinel-stderr.log
+
+[Install]
+WantedBy=default.target
+SERVICE
+
+    # Reload systemd, enable and start
+    systemctl --user daemon-reload
+    systemctl --user enable "${SERVICE_NAME}.service"
+    systemctl --user start "${SERVICE_NAME}.service"
+
+    # Enable linger so the service survives logout
+    if command -v loginctl &>/dev/null; then
+      loginctl enable-linger "${USER}" 2>/dev/null || echo "Note: couldn't enable linger (needs sudo). The daemon may stop on logout."
+    fi
+
+    echo ""
+    echo "Sentinel daemon installed and running (Linux/systemd)."
+    echo "  Daemon: ${SENTINEL_DIR}/sentinel.ts"
+    echo "  Service: ${SERVICE_FILE}"
+    echo "  Status: systemctl --user status ${SERVICE_NAME}"
+    echo "  Logs: journalctl --user -u ${SERVICE_NAME} -f"
+    echo "         or: ${SENTINEL_DIR}/logs/"
+    ;;
+
+  *)
+    echo "Error: unsupported OS '${OS}'. This plugin supports macOS and Linux."
+    exit 1
+    ;;
+esac
+
 echo ""
 echo "Next: add a bot with /add-bot"

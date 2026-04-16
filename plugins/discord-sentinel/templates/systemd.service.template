@@ -1,0 +1,16 @@
+[Unit]
+Description=Discord Sentinel - Bot pool manager for Claude Code
+After=network.target
+
+[Service]
+Type=simple
+ExecStart={{BUN_PATH}} {{SENTINEL_DIR}}/sentinel.ts
+WorkingDirectory={{SENTINEL_DIR}}
+Restart=always
+RestartSec=5
+Environment="PATH=/usr/local/bin:/usr/bin:/bin:%h/.bun/bin:%h/.local/bin"
+StandardOutput=append:{{SENTINEL_DIR}}/logs/sentinel-stdout.log
+StandardError=append:{{SENTINEL_DIR}}/logs/sentinel-stderr.log
+
+[Install]
+WantedBy=default.target

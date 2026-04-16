@@ -7,7 +7,7 @@ args: "<start|stop|status|logs>"
 
 # Sentinel Daemon Management
 
-Manage the Discord Sentinel daemon service.
+Manage the Discord Sentinel daemon service. Detects OS (macOS/Linux) and uses the appropriate service manager (launchctl/systemctl).
 
 ## Parse the action
 
@@ -15,26 +15,54 @@ The user should provide one of: `start`, `stop`, `status`, `logs`
 
 If no action provided, show usage and current status.
 
+## Detect OS
+
+Always check the OS first:
+```bash
+OS=$(uname -s)
+```
+
 ## Actions
 
 ### start
+
+**macOS:**
 ```bash
 launchctl load ~/Library/LaunchAgents/com.claude.discord-sentinel.plist
 ```
+
+**Linux:**
+```bash
+systemctl --user start claude-discord-sentinel
+```
+
 Confirm it started by checking status.
 
 ### stop
+
+**macOS:**
 ```bash
 launchctl unload ~/Library/LaunchAgents/com.claude.discord-sentinel.plist
 ```
 
+**Linux:**
+```bash
+systemctl --user stop claude-discord-sentinel
+```
+
 ### status
-Check if the service is running:
+
+**macOS:**
 ```bash
 launchctl list com.claude.discord-sentinel 2>/dev/null
 ```
 
-Show bot statuses by reading lock files:
+**Linux:**
+```bash
+systemctl --user status claude-discord-sentinel --no-pager
+```
+
+Then, on both OSes, show bot statuses by reading lock files:
 ```bash
 for lock in ~/.claude/discord-sentinel/locks/*.lock; do
   [ -f "$lock" ] || continue
@@ -54,7 +82,18 @@ jq -r 'to_entries[] | select(.key != "_config") | .key' ~/.claude/discord-sentin
 ```
 
 ### logs
-Show recent sentinel logs:
+
+**macOS:**
+```bash
+tail -50 ~/.claude/discord-sentinel/logs/sentinel-$(date +%Y-%m-%d).log 2>/dev/null || tail -50 ~/.claude/discord-sentinel/logs/sentinel-stderr.log
+```
+
+**Linux:**
+```bash
+journalctl --user -u claude-discord-sentinel -n 50 --no-pager
+```
+
+If journalctl returns nothing, fall back to the file log:
 ```bash
 tail -50 ~/.claude/discord-sentinel/logs/sentinel-$(date +%Y-%m-%d).log 2>/dev/null || tail -50 ~/.claude/discord-sentinel/logs/sentinel-stderr.log
 ```

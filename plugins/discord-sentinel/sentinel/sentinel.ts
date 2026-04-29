@@ -457,6 +457,7 @@ function startLockMonitor(botName: string, state: BotState) {
     } else if (!active && state.status === 'active') {
       log(`[${botName}] Session ended — reclaiming gateway (idle mode)`)
       state.sessionStartedAt = undefined
+      state.status = 'idle'
       await connectBot(botName, state)
     } else if (active && state.status === 'active' && state.sessionStartedAt) {
       // Check session timeout (opt-in: set timeout_hours in bots.json, 0 = disabled)

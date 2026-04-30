@@ -53,6 +53,7 @@ interface BotConfig {
   label: string
   approval_channel?: string
   timeout_hours?: number  // Auto-kill after N hours of inactivity (default: 4)
+  auto_recover_rate_limit?: boolean  // Auto-recover when Claude rate-limit prompt blocks the session (default: true)
 }
 
 interface PoolConfig {
@@ -68,6 +69,8 @@ interface BotState {
   retryTimer: ReturnType<typeof setTimeout> | null
   lockCheckTimer: ReturnType<typeof setInterval> | null
   sessionStartedAt?: number  // Timestamp when session was spawned
+  rateLimitTickCount?: number  // Internal counter for throttled rate-limit detection
+  rateLimitLastNotifyAt?: number  // Last time we notified owner about a rate-limit (cooldown)
 }
 
 // ── State ──────────────────────────────────────────────────────────────────────
@@ -91,20 +94,25 @@ function log(msg: string) {
 
 // ── Health notifications ───────────────────────────────────────────────────────
 /**
- * Sends a DM to the owner via the first available bot's token.
- * Used for health notifications (sentinel start, crash recovery).
+ * Sends a DM to the owner via Discord. By default uses the first registered
+ * bot's token; pass a specific config to send via a particular bot (so the DM
+ * shows up under that bot's chat — e.g., for per-bot rate-limit notifications).
  */
-async function notifyOwner(message: string) {
+async function notifyOwner(message: string, viaBot?: BotConfig) {
   if (!poolConfig.owner_id) return
 
-  // Find the first bot with a token to send the notification
-  const { bots: registry } = loadBots()
-  const firstBot = Object.values(registry)[0]
-  if (!firstBot) return
+  let token: string | null = null
+  if (viaBot) {
+    token = viaBot.token
+  } else {
+    const { bots: registry } = loadBots()
+    token = Object.values(registry)[0]?.token ?? null
+  }
+  if (!token) return
 
   try {
     const API = 'https://discord.com/api/v10'
-    const AUTH = `Bot ${firstBot.token}`
+    const AUTH = `Bot ${token}`
 
     // Open DM channel with owner
     const dmRes = await fetch(`${API}/users/@me/channels`, {
@@ -124,6 +132,100 @@ async function notifyOwner(message: string) {
   } catch (err: any) {
     log(`Health notification failed: ${err.message}`)
   }
+}
+
+// ── Rate-limit detection + recovery ────────────────────────────────────────────
+// Claude Code's TUI prompts the user with a /rate-limit-options menu when the
+// usage cap is hit. The screen session stays alive but the agent loop is
+// blocked waiting for user input. `screen -X stuff` does not reach the TUI
+// (raw /dev/tty mode), so we can't programmatically dismiss the prompt — but
+// we CAN detect it from the screen's hardcopy output, notify the owner, and
+// kill the stuck session. The lock monitor's existing stale-lock cleanup +
+// gateway reclaim then brings the bot back to idle. The next DM respawns with
+// `--continue`, which preserves the conversation state on disk.
+
+const RATE_LIMIT_PATTERNS: RegExp[] = [
+  /You've hit your limit/i,
+  /\/rate-limit-options/,
+]
+const RATE_LIMIT_TICK_INTERVAL = 5  // Check every N lock-monitor ticks (~15s at 3s tick)
+const RATE_LIMIT_NOTIFY_COOLDOWN_MS = 30 * 60 * 1000  // Don't notify same bot more than once per 30 min
+
+/**
+ * Strip common ANSI escape sequences from a terminal capture.
+ * Conservative — handles CSI (`\x1b[…`) and OSC (`\x1b]…\x07`) sequences,
+ * which is what claude-code emits.
+ */
+function stripAnsi(s: string): string {
+  return s
+    .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')
+    .replace(/\x1b\][^\x07]*\x07/g, '')
+}
+
+/**
+ * Capture the current screen of the bot's screen session and check for the
+ * Claude rate-limit prompt. Uses `hardcopy` (without `-h`) so we only inspect
+ * the visible screen, not the full scrollback. Returns false on any error
+ * (screen not available, capture failed, regex no match).
+ */
+function detectRateLimit(botName: string): boolean {
+  const screenName = `claude-${botName}`
+  const captureFile = join('/tmp', `sentinel-rl-${botName}.txt`)
+  try {
+    execSync(`screen -S '${screenName}' -p 0 -X hardcopy '${captureFile}'`, { timeout: 5000 })
+  } catch {
+    return false
+  }
+  let text: string
+  try {
+    text = readFileSync(captureFile, 'utf8')
+  } catch {
+    return false
+  } finally {
+    try { unlinkSync(captureFile) } catch {}
+  }
+  const cleaned = stripAnsi(text)
+  return RATE_LIMIT_PATTERNS.every(rx => rx.test(cleaned))
+}
+
+/**
+ * Recover from a stuck rate-limit prompt: notify owner via the affected bot's
+ * own DM, kill the claude PID, drop the lock, quit the screen session.
+ * The lock-monitor's existing reclaim path then brings the bot back to idle
+ * gateway mode. Honors a per-bot cooldown to avoid notification storms.
+ */
+async function recoverFromRateLimit(botName: string, state: BotState) {
+  const now = Date.now()
+  const last = state.rateLimitLastNotifyAt ?? 0
+  if (now - last < RATE_LIMIT_NOTIFY_COOLDOWN_MS) return
+
+  state.rateLimitLastNotifyAt = now
+  log(`[${botName}] Rate-limit prompt detected — notifying owner and recovering`)
+
+  const message =
+    `⚠️ **${state.config.label}** topó con el rate-limit de Claude y la sesión quedó plantada en el menú de opciones.\n\n` +
+    `Liberé el gateway: maté el proceso atascado, el bot vuelve a idle. Cuando el límite se libere y me mandes un DM, ` +
+    `\`--continue\` retoma el contexto previo desde el JSONL.`
+
+  try {
+    await notifyOwner(message, state.config)
+  } catch (err: any) {
+    log(`[${botName}] Rate-limit notify failed: ${err.message}`)
+  }
+
+  // Kill the claude PID
+  try {
+    const content = readFileSync(getLockPath(botName), 'utf8').trim()
+    const pid = parseInt(content, 10)
+    if (!isNaN(pid)) {
+      process.kill(pid, 'SIGTERM')
+      log(`[${botName}] Sent SIGTERM to PID ${pid}`)
+    }
+  } catch {}
+
+  // Drop lock + quit screen — lock monitor's stale-lock path will reclaim gateway on next tick
+  try { unlinkSync(getLockPath(botName)) } catch {}
+  try { execSync(`screen -S 'claude-${botName}' -X quit 2>/dev/null`) } catch {}
 }
 
 // ── Channel auto-provisioning ──────────────────────────────────────────────────
@@ -473,6 +575,18 @@ function startLockMonitor(botName: string, state: BotState) {
           } catch {}
           try { unlinkSync(getLockPath(botName)) } catch {}
           try { execSync(`screen -S claude-${botName} -X quit 2>/dev/null`) } catch {}
+        }
+      }
+
+      // Rate-limit detection (default enabled; opt-out per bot via auto_recover_rate_limit=false)
+      const autoRecover = state.config.auto_recover_rate_limit !== false
+      if (autoRecover) {
+        state.rateLimitTickCount = (state.rateLimitTickCount ?? 0) + 1
+        if (state.rateLimitTickCount >= RATE_LIMIT_TICK_INTERVAL) {
+          state.rateLimitTickCount = 0
+          if (detectRateLimit(botName)) {
+            await recoverFromRateLimit(botName, state)
+          }
         }
       }
     }

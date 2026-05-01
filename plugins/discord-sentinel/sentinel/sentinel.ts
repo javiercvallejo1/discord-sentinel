@@ -48,6 +48,11 @@ const CHANNELS_DIR = join(homedir(), '.claude', 'channels')
 const PLUGIN_CACHE_DIR = join(homedir(), '.claude', 'plugins', 'cache', 'discord-sentinel', 'discord-sentinel')
 const SYNCED_VERSION_FILE = join(SENTINEL_DIR, '.synced-version')
 
+// Bounded retry on gateway reclaim. The lock monitor ticks every 3s; 10 attempts
+// = 30s of churn before we crash-restart. Long enough to ride out transient
+// races (lock cleanup vs. respawn), short enough to avoid silent zombie loops.
+const MAX_RECLAIM_ATTEMPTS = 10
+
 mkdirSync(LOCKS_DIR, { recursive: true })
 mkdirSync(LOGS_DIR, { recursive: true })
 mkdirSync(PERSONALITIES_DIR, { recursive: true })
@@ -76,6 +81,7 @@ interface BotState {
   lockCheckTimer: ReturnType<typeof setInterval> | null
   sessionStartedAt?: number  // Timestamp when session was spawned
   rateLimitTickCount?: number  // Internal counter for throttled rate-limit detection
+  reclaimAttempts?: number  // Consecutive failed gateway reclaims; trips a crash-restart at MAX_RECLAIM_ATTEMPTS
   rateLimitLastNotifyAt?: number  // Last time we notified owner about a rate-limit (cooldown)
 }
 
@@ -300,6 +306,21 @@ function readSyncedVersion(): string | null {
   }
 }
 
+/**
+ * Read the plugin's SemVer from .claude-plugin/plugin.json inside a cache
+ * version directory. Returns null on any error so callers can fall back to
+ * the hash-based label.
+ */
+function readPluginVersionFromManifest(pluginPath: string): string | null {
+  try {
+    const raw = readFileSync(join(pluginPath, '.claude-plugin', 'plugin.json'), 'utf8')
+    const manifest = JSON.parse(raw) as { version?: string }
+    return manifest.version ?? null
+  } catch {
+    return null
+  }
+}
+
 function writeSyncedVersion(hash: string) {
   try { writeFileSync(SYNCED_VERSION_FILE, hash + '\n') } catch {}
 }
@@ -319,16 +340,18 @@ async function checkPluginUpdate(): Promise<void> {
 
   const synced = readSyncedVersion()
 
+  const latestVersion = readPluginVersionFromManifest(latest.path) ?? latest.hash.slice(0, 12)
+
   if (!synced) {
     // First run after auto-sync was enabled — record baseline, no restart.
     writeSyncedVersion(latest.hash)
-    log(`Auto-sync baseline recorded: ${latest.hash}`)
+    log(`Auto-sync baseline recorded: v${latestVersion} (cache=${latest.hash.slice(0, 12)})`)
     return
   }
 
   if (synced === latest.hash) return
 
-  log(`Plugin update detected: ${synced} → ${latest.hash}. Syncing files...`)
+  log(`Plugin update detected: v${latestVersion} (cache=${latest.hash.slice(0, 12)}). Syncing files...`)
 
   let copied = 0
   for (const [srcRel, dstName, exec] of PLUGIN_FILES_TO_SYNC) {
@@ -348,7 +371,7 @@ async function checkPluginUpdate(): Promise<void> {
   log(`Auto-sync: ${copied}/${PLUGIN_FILES_TO_SYNC.length} files synced. Restarting...`)
 
   try {
-    await notifyOwner(`🔄 **Discord Sentinel auto-synced** to plugin version \`${latest.hash.slice(0, 12)}\`. Restarting daemon to pick up new code.`)
+    await notifyOwner(`🔄 **Discord Sentinel auto-synced** to v${latestVersion}. Restarting daemon to pick up new code.`)
   } catch {}
 
   // Give the notification a moment to flush, then exit. KeepAlive restarts us.
@@ -636,6 +659,7 @@ async function connectBot(botName: string, state: BotState): Promise<void> {
     await client.login(state.config.token)
     state.status = 'idle'
     state.retryCount = 0
+    state.reclaimAttempts = 0
     log(`[${botName}] Logged in — idle mode`)
   } catch (err: any) {
     state.status = 'errored'
@@ -683,11 +707,26 @@ function startLockMonitor(botName: string, state: BotState) {
       await disconnectBot(botName, state)
       state.status = 'active'
       state.sessionStartedAt = Date.now()
+      state.reclaimAttempts = 0
     } else if (!active && state.status === 'active') {
       log(`[${botName}] Session ended — reclaiming gateway (idle mode)`)
       state.sessionStartedAt = undefined
       state.status = 'idle'
       await connectBot(botName, state)
+
+      // Bounded retry: if reclaim keeps firing without ever transitioning to a
+      // healthy 'idle' (login succeeded) or 'active' (session retook the lock),
+      // we're stuck in a tight loop. Exit so launchd/systemd restarts us clean.
+      // connectBot resets reclaimAttempts on successful login. The lock-monitor's
+      // hand-off branch also resets it. So this only counts true failures.
+      state.reclaimAttempts = (state.reclaimAttempts ?? 0) + 1
+      if (state.reclaimAttempts >= MAX_RECLAIM_ATTEMPTS) {
+        log(`[${botName}] Reclaim loop exhausted after ${state.reclaimAttempts} attempts — crash-restarting daemon`)
+        try {
+          await notifyOwner(`⚠️ Discord Sentinel: ${state.config.label} stuck in gateway-reclaim loop after ${state.reclaimAttempts} attempts. Crash-restarting daemon (KeepAlive will respawn).`)
+        } catch {}
+        setTimeout(() => process.exit(1), 1000)
+      }
     } else if (active && state.status === 'active' && state.sessionStartedAt) {
       // Check session timeout (opt-in: set timeout_hours in bots.json, 0 = disabled)
       const timeoutHours = state.config.timeout_hours ?? 0

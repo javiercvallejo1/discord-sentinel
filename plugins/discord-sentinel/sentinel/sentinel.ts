@@ -29,6 +29,10 @@ import {
   existsSync,
   unlinkSync,
   watch,
+  readdirSync,
+  statSync,
+  copyFileSync,
+  chmodSync,
 } from 'fs'
 import { execSync } from 'child_process'
 import { homedir } from 'os'
@@ -41,6 +45,8 @@ const LOCKS_DIR = join(SENTINEL_DIR, 'locks')
 const LOGS_DIR = join(SENTINEL_DIR, 'logs')
 const PERSONALITIES_DIR = join(SENTINEL_DIR, 'personalities')
 const CHANNELS_DIR = join(homedir(), '.claude', 'channels')
+const PLUGIN_CACHE_DIR = join(homedir(), '.claude', 'plugins', 'cache', 'discord-sentinel', 'discord-sentinel')
+const SYNCED_VERSION_FILE = join(SENTINEL_DIR, '.synced-version')
 
 mkdirSync(LOCKS_DIR, { recursive: true })
 mkdirSync(LOGS_DIR, { recursive: true })
@@ -226,6 +232,127 @@ async function recoverFromRateLimit(botName: string, state: BotState) {
   // Drop lock + quit screen — lock monitor's stale-lock path will reclaim gateway on next tick
   try { unlinkSync(getLockPath(botName)) } catch {}
   try { execSync(`screen -S 'claude-${botName}' -X quit 2>/dev/null`) } catch {}
+}
+
+// ── Auto-sync from plugin cache ────────────────────────────────────────────────
+// When the marketplace plugin updates (user pushes to the discord-sentinel repo →
+// Claude Code refreshes the plugin cache), sync the runtime files from the new
+// version into the deployed location and restart the daemon. Without this, the
+// cache stays current but the long-running daemon still runs old code, and the
+// hook scripts/configs drift out of sync — that's how bugs like
+// 'session-start-hook.sh missing first-run setup' or
+// 'plugin.json in wrong location' silently pile up.
+//
+// The check runs every 60s. The daemon stores the last-synced version hash in
+// `.synced-version` (under SENTINEL_DIR). On change, copy files + exit cleanly;
+// launchd/systemd's KeepAlive restarts us with the new code.
+
+const PLUGIN_SYNC_INTERVAL_MS = 60_000
+
+// Files the deployed daemon owns, mapped from plugin-cache source path → deployed name.
+const PLUGIN_FILES_TO_SYNC: Array<[string, string, boolean]> = [
+  // [src relative to plugin root, deployed file name, executable]
+  ['sentinel/sentinel.ts',          'sentinel.ts',            false],
+  ['sentinel/sentinel-lock.sh',     'sentinel-lock.sh',       true],
+  ['scripts/discord-approve.sh',    'discord-approve.sh',     true],
+  ['scripts/add-bot.sh',            'add-bot',                true],
+  ['scripts/remove-bot.sh',         'remove-bot',             true],
+  ['scripts/uninstall-daemon.sh',   'uninstall',              true],
+  ['scripts/session-start-hook.sh', 'session-start-hook.sh',  true],
+  ['package.json',                  'package.json',           false],
+]
+
+interface PluginVersion {
+  hash: string
+  path: string
+  mtimeMs: number
+}
+
+/**
+ * Find the most recently modified version directory under the plugin cache.
+ * Returns null if the cache doesn't exist or is empty.
+ */
+function findLatestPluginVersion(): PluginVersion | null {
+  try {
+    const entries = readdirSync(PLUGIN_CACHE_DIR)
+    let best: PluginVersion | null = null
+    for (const name of entries) {
+      const p = join(PLUGIN_CACHE_DIR, name)
+      try {
+        const stat = statSync(p)
+        if (!stat.isDirectory()) continue
+        if (!best || stat.mtimeMs > best.mtimeMs) {
+          best = { hash: name, path: p, mtimeMs: stat.mtimeMs }
+        }
+      } catch {}
+    }
+    return best
+  } catch {
+    return null
+  }
+}
+
+function readSyncedVersion(): string | null {
+  try {
+    return readFileSync(SYNCED_VERSION_FILE, 'utf8').trim() || null
+  } catch {
+    return null
+  }
+}
+
+function writeSyncedVersion(hash: string) {
+  try { writeFileSync(SYNCED_VERSION_FILE, hash + '\n') } catch {}
+}
+
+/**
+ * Compare deployed sync version to the latest in the plugin cache. If newer,
+ * copy the runtime files into SENTINEL_DIR, notify the owner, and exit so
+ * launchd/systemd auto-restarts us with the new code.
+ *
+ * On the very first run after this feature is added, we record the current
+ * cache version as the baseline and DON'T trigger an update — otherwise every
+ * existing install would do a no-op self-restart on first boot.
+ */
+async function checkPluginUpdate(): Promise<void> {
+  const latest = findLatestPluginVersion()
+  if (!latest) return
+
+  const synced = readSyncedVersion()
+
+  if (!synced) {
+    // First run after auto-sync was enabled — record baseline, no restart.
+    writeSyncedVersion(latest.hash)
+    log(`Auto-sync baseline recorded: ${latest.hash}`)
+    return
+  }
+
+  if (synced === latest.hash) return
+
+  log(`Plugin update detected: ${synced} → ${latest.hash}. Syncing files...`)
+
+  let copied = 0
+  for (const [srcRel, dstName, exec] of PLUGIN_FILES_TO_SYNC) {
+    const srcPath = join(latest.path, srcRel)
+    const dstPath = join(SENTINEL_DIR, dstName)
+    if (!existsSync(srcPath)) continue
+    try {
+      copyFileSync(srcPath, dstPath)
+      if (exec) chmodSync(dstPath, 0o755)
+      copied++
+    } catch (err: any) {
+      log(`  failed to sync ${srcRel} → ${dstName}: ${err.message}`)
+    }
+  }
+
+  writeSyncedVersion(latest.hash)
+  log(`Auto-sync: ${copied}/${PLUGIN_FILES_TO_SYNC.length} files synced. Restarting...`)
+
+  try {
+    await notifyOwner(`🔄 **Discord Sentinel auto-synced** to plugin version \`${latest.hash.slice(0, 12)}\`. Restarting daemon to pick up new code.`)
+  } catch {}
+
+  // Give the notification a moment to flush, then exit. KeepAlive restarts us.
+  setTimeout(() => process.exit(0), 2000)
 }
 
 // ── Channel auto-provisioning ──────────────────────────────────────────────────
@@ -703,3 +830,10 @@ log(`Sentinel running — managing ${bots.size} bot(s), owner: ${poolConfig.owne
 
 // Notify owner on startup (useful for crash recovery detection via launchd KeepAlive)
 notifyOwner(`Sentinel started — managing ${bots.size} bot(s)`).catch(() => {})
+
+// Auto-sync from plugin cache: record baseline now, then poll every 60s.
+// On a newer version detected, copies runtime files + exits so KeepAlive restarts us.
+checkPluginUpdate().catch(err => log(`Initial plugin-sync check failed: ${err.message}`))
+setInterval(() => {
+  checkPluginUpdate().catch(err => log(`Plugin-sync check failed: ${err.message}`))
+}, PLUGIN_SYNC_INTERVAL_MS)

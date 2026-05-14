@@ -272,11 +272,44 @@ interface PluginVersion {
   hash: string
   path: string
   mtimeMs: number
+  semver: [number, number, number] | null
 }
 
 /**
- * Find the most recently modified version directory under the plugin cache.
- * Returns null if the cache doesn't exist or is empty.
+ * Parse a SemVer string into a numeric triple. Pre-release / build metadata
+ * is ignored — only major.minor.patch participate in comparisons.
+ */
+function parseSemver(v: string | null): [number, number, number] | null {
+  if (!v) return null
+  const m = v.match(/^(\d+)\.(\d+)\.(\d+)/)
+  if (!m) return null
+  return [parseInt(m[1], 10), parseInt(m[2], 10), parseInt(m[3], 10)]
+}
+
+function semverCompare(a: [number, number, number], b: [number, number, number]): number {
+  for (let i = 0; i < 3; i++) {
+    if (a[i] !== b[i]) return a[i] - b[i]
+  }
+  return 0
+}
+
+/**
+ * Pick the cache version we should treat as canonical.
+ *
+ * Selection priority:
+ *   1. Higher SemVer (read from .claude-plugin/plugin.json inside each cache
+ *      directory) wins.
+ *   2. If two directories report the same SemVer, the most recently modified
+ *      one wins.
+ *   3. Directories without a parseable SemVer rank below any with one. When
+ *      none have a SemVer, fall back to mtime so first-run hash-named dirs
+ *      still resolve.
+ *
+ * Why not "latest by mtime"? Claude Code's plugin cache can hold multiple
+ * directories for the same plugin name simultaneously — a SemVer-named dir
+ * (e.g. `1.0.0/`) and a content-hash-named dir (e.g. `c6851c8783cf/`). The
+ * mtime of those can flip on benign cache refreshes, and a stale older
+ * snapshot reappearing with a fresh mtime would otherwise downgrade us.
  */
 function findLatestPluginVersion(): PluginVersion | null {
   try {
@@ -287,9 +320,22 @@ function findLatestPluginVersion(): PluginVersion | null {
       try {
         const stat = statSync(p)
         if (!stat.isDirectory()) continue
-        if (!best || stat.mtimeMs > best.mtimeMs) {
-          best = { hash: name, path: p, mtimeMs: stat.mtimeMs }
+        const semver = parseSemver(readPluginVersionFromManifest(p))
+        const candidate: PluginVersion = { hash: name, path: p, mtimeMs: stat.mtimeMs, semver }
+        if (!best) {
+          best = candidate
+          continue
         }
+        // SemVer ranks above mtime. Either or both can be null.
+        if (candidate.semver && best.semver) {
+          const cmp = semverCompare(candidate.semver, best.semver)
+          if (cmp > 0 || (cmp === 0 && candidate.mtimeMs > best.mtimeMs)) best = candidate
+        } else if (candidate.semver && !best.semver) {
+          best = candidate
+        } else if (!candidate.semver && !best.semver) {
+          if (candidate.mtimeMs > best.mtimeMs) best = candidate
+        }
+        // (candidate.semver null, best.semver non-null) → keep best.
       } catch {}
     }
     return best
@@ -316,6 +362,21 @@ function readPluginVersionFromManifest(pluginPath: string): string | null {
     const raw = readFileSync(join(pluginPath, '.claude-plugin', 'plugin.json'), 'utf8')
     const manifest = JSON.parse(raw) as { version?: string }
     return manifest.version ?? null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Read the SemVer from a package.json — used to discover the deployed runtime's
+ * version, which we sync from the plugin's package.json (it's in
+ * PLUGIN_FILES_TO_SYNC) but don't bring `.claude-plugin/plugin.json` for.
+ */
+function readPackageJsonVersion(dir: string): string | null {
+  try {
+    const raw = readFileSync(join(dir, 'package.json'), 'utf8')
+    const pkg = JSON.parse(raw) as { version?: string }
+    return pkg.version ?? null
   } catch {
     return null
   }
@@ -350,6 +411,22 @@ async function checkPluginUpdate(): Promise<void> {
   }
 
   if (synced === latest.hash) return
+
+  // Downgrade guard: refuse to sync a strictly lower SemVer than what's already
+  // deployed. The cache can hold multiple snapshots of the same plugin (e.g. a
+  // SemVer-named `1.0.0/` next to a hash-named `c685…/`); if the candidate's
+  // SemVer reads lower than the deployed `package.json`'s version we treat it
+  // as a stale snapshot, not an update.
+  const deployedSemver = parseSemver(
+    readPluginVersionFromManifest(SENTINEL_DIR) ?? readPackageJsonVersion(SENTINEL_DIR)
+  )
+  if (latest.semver && deployedSemver && semverCompare(latest.semver, deployedSemver) < 0) {
+    log(
+      `Auto-sync skipped: cache v${latestVersion} is lower than deployed v` +
+      `${deployedSemver.join('.')} — treating as stale snapshot.`
+    )
+    return
+  }
 
   log(`Plugin update detected: v${latestVersion} (cache=${latest.hash.slice(0, 12)}). Syncing files...`)
 

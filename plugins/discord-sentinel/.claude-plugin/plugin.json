@@ -1,7 +1,7 @@
 {
   "name": "discord-sentinel",
   "description": "Discord bot pool manager for Claude Code — per-bot personality, memory, auto-spawn sessions on DM",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "author": {
     "name": "Javier Vallejo"
   },

@@ -649,13 +649,25 @@ function createClient(botName: string, config: BotConfig): Client {
     },
   })
 
-  client.once('ready', c => {
-    log(`[${botName}] Connected as ${c.user.tag} — idle mode`)
-    c.user.setPresence({
+  const applyIdlePresence = () => {
+    if (bots.get(botName)?.status !== 'idle') return
+    client.user?.setPresence({
       status: 'idle',
       activities: [{ name: idleActivity, type: ActivityType.Watching }],
     })
+  }
+
+  client.once('ready', c => {
+    log(`[${botName}] Connected as ${c.user.tag} — idle mode`)
+    applyIdlePresence()
   })
+
+  // discord.js v14 doesn't replay ClientOptions.presence after gateway
+  // RESUME / re-IDENTIFY, so over long uptimes bots drift to default presence.
+  // Re-apply idle presence whenever a shard reconnects, but only if we're
+  // actually idle — otherwise we'd overwrite an active session's presence.
+  client.on('shardReady', applyIdlePresence)
+  client.on('shardResume', applyIdlePresence)
 
   // discord.js v14 silently drops DM messageCreate events due to a partial
   // channel resolution bug. Use the raw websocket handler instead, then fetch

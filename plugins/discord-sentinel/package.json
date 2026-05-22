@@ -1,6 +1,6 @@
 {
   "name": "discord-sentinel",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Discord bot pool manager for Claude Code",
   "type": "module",
   "scripts": {

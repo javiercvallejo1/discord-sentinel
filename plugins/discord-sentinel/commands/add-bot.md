@@ -25,6 +25,23 @@ Ask: "What project directory should this bot work in?"
 
 Suggest the current working directory as default. The bot will `cd` to this directory when a session starts.
 
+If the directory doesn't exist it will be created automatically — no action needed from the user.
+
+## Step 2b: Model (optional)
+
+Ask: "Which Claude model should this bot use?"
+
+Options to offer:
+- **Inherit from settings.json** (default) — bot uses whatever `~/.claude/settings.json` specifies. Update settings.json once to change all bots that inherit.
+- **sonnet** — latest Sonnet tier (auto-updates within the tier as Anthropic ships new Sonnet versions)
+- **opus** — latest Opus tier
+- **opusplan** — Opus for planning, Sonnet for execution (Claude Code compound mode)
+- A pinned full model ID, e.g. `claude-fable-5` — stays on that exact snapshot until manually changed
+
+If the user wants to stay on the latest frontier model without manual updates, recommend **Inherit from settings.json** and updating `~/.claude/settings.json` when new models ship. If they want a specific bot to always use a particular model regardless of settings, use a pinned ID or tier alias.
+
+If the user selects "Inherit" or skips, omit the model argument from the register command.
+
 ## Step 3: Personality
 
 Ask the user:
@@ -50,8 +67,14 @@ If yes, note that the approval env vars will be set in the spawn wrapper. The us
 
 Register the bot using the CLI script:
 ```bash
+# Without model override (inherits from settings.json):
 ~/.claude/discord-sentinel/add-bot "<name>" "<token>" "<project-dir>"
+
+# With model override:
+~/.claude/discord-sentinel/add-bot "<name>" "<token>" "<project-dir>" "<model>"
 ```
+
+The project directory will be created automatically if it doesn't exist.
 
 **If the add-bot script is missing**, write the entry directly to bots.json using jq. The schema for each bot entry is:
 
@@ -60,7 +83,8 @@ Register the bot using the CLI script:
   "<bot-name>": {
     "token": "<discord-bot-token>",
     "project": "<absolute-path-to-project-dir>",
-    "label": "<display-name>"
+    "label": "<display-name>",
+    "model": "<optional-model-override>"
   }
 }
 ```
@@ -71,11 +95,18 @@ Required fields:
 
 Optional fields:
 - `project` (string) — absolute path to project directory. If omitted, uses `_config.default_project`
+- `model` (string) — Claude model to use for this bot's sessions. Accepts tier aliases (`sonnet`, `opus`, `haiku`, `opusplan`) or full model IDs (`claude-fable-5`, `claude-opus-4-8`, etc.). If omitted, inherits from `~/.claude/settings.json`.
 
 Example jq command to add directly:
 ```bash
 jq --arg name "<name>" --arg token "<token>" --arg project "<dir>" --arg label "<name>" \
   '.[$name] = {token: $token, project: $project, label: $label}' \
+  ~/.claude/discord-sentinel/bots.json > /tmp/bots.tmp \
+  && mv /tmp/bots.tmp ~/.claude/discord-sentinel/bots.json
+
+# With model override:
+jq --arg name "<name>" --arg token "<token>" --arg project "<dir>" --arg label "<name>" --arg model "<model>" \
+  '.[$name] = {token: $token, project: $project, label: $label, model: $model}' \
   ~/.claude/discord-sentinel/bots.json > /tmp/bots.tmp \
   && mv /tmp/bots.tmp ~/.claude/discord-sentinel/bots.json
 ```

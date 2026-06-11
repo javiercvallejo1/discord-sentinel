@@ -18,7 +18,23 @@ Run these checks:
 
 If any are missing, tell the user how to install them and stop.
 
-## Step 2: Check for remember plugin
+## Step 2: Check for plugins
+
+### Discord channel plugin (required)
+
+Check if the discord channel plugin is installed:
+```bash
+claude plugins list 2>/dev/null | grep -q 'discord@claude-plugins-official' && echo "installed" || echo "missing"
+```
+
+If NOT installed, install it — **this plugin is required** for bots to send and receive Discord messages:
+```bash
+claude plugins install discord@claude-plugins-official
+```
+
+The install script (Step 3) will also do this automatically, but surfacing it here makes the dependency explicit.
+
+### Remember plugin (optional)
 
 Check if the remember plugin is installed:
 ```bash
@@ -28,7 +44,7 @@ ls ~/.claude/plugins/cache/*/remember 2>/dev/null
 If NOT installed, ask the user:
 > "The **remember** plugin gives your bots persistent memory across sessions — they'll accumulate context and remember past conversations. Want me to install it? (Recommended)"
 
-If yes: `claude plugins add remember@claude-plugins-official` (or guide them)
+If yes: `claude plugins install remember@claude-plugins-official`
 If no: proceed without it. Bots will still get personality but won't accumulate memory.
 
 ## Step 3: Install the daemon

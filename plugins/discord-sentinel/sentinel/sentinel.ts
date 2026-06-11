@@ -65,6 +65,7 @@ interface BotConfig {
   approval_channel?: string
   timeout_hours?: number  // Auto-kill after N hours of inactivity (default: 4)
   auto_recover_rate_limit?: boolean  // Auto-recover when Claude rate-limit prompt blocks the session (default: true)
+  model?: string  // Optional: passed to claude --model. Omit to inherit from ~/.claude/settings.json. Examples: "sonnet", "opus", "opusplan", "claude-fable-5"
 }
 
 interface PoolConfig {
@@ -570,9 +571,22 @@ async function spawnSession(botName: string, config: BotConfig): Promise<number 
     )
   }
 
+  // --continue resumes conversation history but requires a prior deferred session
+  // state in ~/.claude/projects/<slug>/. On a fresh project (no .jsonl files) it
+  // crashes immediately with "No deferred tool marker found". Only pass it when a
+  // prior session actually exists so the first launch starts clean.
+  const projectSlug = project.replace(/\//g, '-')
+  const projectSessionDir = join(homedir(), '.claude', 'projects', projectSlug)
+  let hasPriorSession = false
+  try { hasPriorSession = readdirSync(projectSessionDir).some(f => f.endsWith('.jsonl')) } catch {}
+
+  // --model flag: only inject when the bot config specifies a model, otherwise
+  // Claude inherits the value from ~/.claude/settings.json.
+  const modelFlag = config.model ? `--model '${sq(config.model)}' ` : ''
+
   wrapperLines.push(
     `cd '${sq(project)}'`,
-    `exec '${sq(claudeBin)}' --channels plugin:discord@claude-plugins-official --dangerously-skip-permissions --continue`,
+    `exec '${sq(claudeBin)}' ${modelFlag}--channels plugin:discord@claude-plugins-official --dangerously-skip-permissions${hasPriorSession ? ' --continue' : ''}`,
   )
   writeFileSync(wrapperScript, wrapperLines.join('\n'), { mode: 0o700 })
 

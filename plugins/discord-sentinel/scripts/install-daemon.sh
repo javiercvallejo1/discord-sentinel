@@ -32,6 +32,11 @@ if ! command -v screen &>/dev/null; then
   exit 1
 fi
 
+if ! command -v claude &>/dev/null; then
+  echo "Error: claude CLI is required. Install Claude Code from https://claude.ai/code"
+  exit 1
+fi
+
 BUN_PATH=$(which bun)
 
 # ── Create sentinel directory ───────────────────────────────────────────────
@@ -72,6 +77,17 @@ fi
 # ── Install dependencies ────────────────────────────────────────────────────
 echo "Installing dependencies..."
 cd "${SENTINEL_DIR}" && bun install --silent
+
+# ── Install discord channel plugin ──────────────────────────────────────────
+# The sentinel spawns claude with --channels plugin:discord@claude-plugins-official.
+# Without this plugin installed claude cannot send or receive Discord messages.
+if claude plugins list 2>/dev/null | grep -q 'discord@claude-plugins-official'; then
+  echo "Discord channel plugin already installed."
+else
+  echo "Installing discord channel plugin..."
+  claude plugins install discord@claude-plugins-official || \
+    echo "WARNING: failed to install discord channel plugin — bots will be unable to reply on Discord. Run 'claude plugins install discord@claude-plugins-official' manually."
+fi
 
 # ── Install service (OS-specific) ───────────────────────────────────────────
 case "${OS}" in

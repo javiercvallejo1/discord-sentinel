@@ -575,7 +575,13 @@ async function spawnSession(botName: string, config: BotConfig): Promise<number 
   // state in ~/.claude/projects/<slug>/. On a fresh project (no .jsonl files) it
   // crashes immediately with "No deferred tool marker found". Only pass it when a
   // prior session actually exists so the first launch starts clean.
-  const projectSlug = project.replace(/\//g, '-')
+  //
+  // Claude derives <slug> by replacing every non-alphanumeric char in the project
+  // path with '-' (e.g. /a/b_c.d -> -a-b-c-d), not just slashes. Mirror that exactly
+  // or paths containing '_', '.' or spaces never match their real session dir and
+  // --continue is silently skipped on every relaunch. Trailing slashes are stripped
+  // because Claude resolves cwd without them before encoding.
+  const projectSlug = project.replace(/\/+$/, '').replace(/[^a-zA-Z0-9]/g, '-')
   const projectSessionDir = join(homedir(), '.claude', 'projects', projectSlug)
   let hasPriorSession = false
   try { hasPriorSession = readdirSync(projectSessionDir).some(f => f.endsWith('.jsonl')) } catch {}
@@ -584,8 +590,14 @@ async function spawnSession(botName: string, config: BotConfig): Promise<number 
   // Claude inherits the value from ~/.claude/settings.json.
   const modelFlag = config.model ? `--model '${sq(config.model)}' ` : ''
 
+  // Guarantee the project dir exists and that we actually entered it before exec.
+  // bots.json can be hand-edited (the docs show a direct jq path that skips
+  // add-bot.sh's mkdir) and dirs can be removed after registration. An unguarded
+  // `cd` to a missing dir fails silently, leaving claude to launch in the sentinel
+  // dir where it blocks on a workspace-trust prompt inside a headless screen.
   wrapperLines.push(
-    `cd '${sq(project)}'`,
+    `mkdir -p '${sq(project)}'`,
+    `cd '${sq(project)}' || { echo '[sentinel] project dir unavailable, aborting' >&2; exit 1; }`,
     `exec '${sq(claudeBin)}' ${modelFlag}--channels plugin:discord@claude-plugins-official --dangerously-skip-permissions${hasPriorSession ? ' --continue' : ''}`,
   )
   writeFileSync(wrapperScript, wrapperLines.join('\n'), { mode: 0o700 })

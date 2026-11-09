@@ -528,6 +528,51 @@ function removeLock(botName: string) {
   } catch {}
 }
 
+// ── Session resume detection ───────────────────────────────────────────────────
+// Claude Code keeps per-project conversation logs at
+//   ~/.claude/projects/<slug>/<session-id>.jsonl
+// where <slug> is the project path with every non-alphanumeric character
+// replaced by '-' (e.g. /a/b_c.d -> -a-b-c-d), not just slashes. Mirror that
+// exactly or paths containing '_', '.' or spaces never match their real session
+// dir and --continue is silently skipped on every relaunch. Trailing slashes are
+// stripped because Claude resolves cwd without them before encoding.
+//
+// `claude --continue` needs one of those .jsonl files to exist. It is missing on
+// a fresh project, and it goes missing again on a long-idle one: Claude sweeps
+// session logs after `cleanupPeriodDays` (30 by default), so a bot that sat
+// quiet for a month comes back to an empty dir. Either way claude exits within
+// seconds ("No conversation found to continue"), the sentinel sees a dead PID
+// and falls back to idle, and the bot looks like it is silently ignoring DMs.
+// Only ask for --continue when there is actually something to continue.
+
+/** Escape single quotes for safe interpolation inside a single-quoted shell string. */
+const sq = (s: string) => s.replace(/'/g, "'\\''")
+
+export function projectSessionsDir(projectDir: string, claudeDir = join(homedir(), '.claude')): string {
+  const slug = projectDir.replace(/\/+$/, '').replace(/[^a-zA-Z0-9]/g, '-')
+  return join(claudeDir, 'projects', slug)
+}
+
+export function hasResumableSession(projectDir: string, claudeDir?: string): boolean {
+  try {
+    return readdirSync(projectSessionsDir(projectDir, claudeDir)).some(f => f.endsWith('.jsonl'))
+  } catch {
+    return false
+  }
+}
+
+/**
+ * The `exec` line of the spawn wrapper. `--model` is only passed when the bot
+ * config pins one; otherwise claude inherits ~/.claude/settings.json.
+ */
+export function claudeLaunchLine(claudeBin: string, resume: boolean, model?: string): string {
+  const flags: string[] = []
+  if (model) flags.push(`--model '${sq(model)}'`)
+  flags.push('--channels plugin:discord@claude-plugins-official', '--dangerously-skip-permissions')
+  if (resume) flags.push('--continue')
+  return `exec '${sq(claudeBin)}' ${flags.join(' ')}`
+}
+
 // ── Session spawning ───────────────────────────────────────────────────────────
 async function spawnSession(botName: string, config: BotConfig): Promise<number | null> {
   const project = config.project || poolConfig.default_project
@@ -547,9 +592,6 @@ async function spawnSession(botName: string, config: BotConfig): Promise<number 
   for (const p of claudePaths) {
     if (existsSync(p)) { claudeBin = p; break }
   }
-
-  // Escape single quotes for safe shell interpolation
-  const sq = (s: string) => s.replace(/'/g, "'\\''")
 
   // Generate spawn wrapper with env vars for personality + approval
   const wrapperScript = join(LOCKS_DIR, `spawn-${botName}.sh`)
@@ -571,24 +613,9 @@ async function spawnSession(botName: string, config: BotConfig): Promise<number 
     )
   }
 
-  // --continue resumes conversation history but requires a prior deferred session
-  // state in ~/.claude/projects/<slug>/. On a fresh project (no .jsonl files) it
-  // crashes immediately with "No deferred tool marker found". Only pass it when a
-  // prior session actually exists so the first launch starts clean.
-  //
-  // Claude derives <slug> by replacing every non-alphanumeric char in the project
-  // path with '-' (e.g. /a/b_c.d -> -a-b-c-d), not just slashes. Mirror that exactly
-  // or paths containing '_', '.' or spaces never match their real session dir and
-  // --continue is silently skipped on every relaunch. Trailing slashes are stripped
-  // because Claude resolves cwd without them before encoding.
-  const projectSlug = project.replace(/\/+$/, '').replace(/[^a-zA-Z0-9]/g, '-')
-  const projectSessionDir = join(homedir(), '.claude', 'projects', projectSlug)
-  let hasPriorSession = false
-  try { hasPriorSession = readdirSync(projectSessionDir).some(f => f.endsWith('.jsonl')) } catch {}
-
-  // --model flag: only inject when the bot config specifies a model, otherwise
-  // Claude inherits the value from ~/.claude/settings.json.
-  const modelFlag = config.model ? `--model '${sq(config.model)}' ` : ''
+  // See "Session resume detection" above for why --continue is conditional.
+  const resume = hasResumableSession(project)
+  log(`[${botName}] ${resume ? 'Resuming saved conversation (--continue)' : 'No saved conversation for this project — starting fresh'}${config.model ? ` · model ${config.model}` : ''}`)
 
   // Guarantee the project dir exists and that we actually entered it before exec.
   // bots.json can be hand-edited (the docs show a direct jq path that skips
@@ -598,7 +625,7 @@ async function spawnSession(botName: string, config: BotConfig): Promise<number 
   wrapperLines.push(
     `mkdir -p '${sq(project)}'`,
     `cd '${sq(project)}' || { echo '[sentinel] project dir unavailable, aborting' >&2; exit 1; }`,
-    `exec '${sq(claudeBin)}' ${modelFlag}--channels plugin:discord@claude-plugins-official --dangerously-skip-permissions${hasPriorSession ? ' --continue' : ''}`,
+    claudeLaunchLine(claudeBin, resume, config.model),
   )
   writeFileSync(wrapperScript, wrapperLines.join('\n'), { mode: 0o700 })
 
@@ -977,17 +1004,21 @@ process.on('SIGINT', shutdown)
 process.on('SIGTERM', shutdown)
 
 // ── Main ───────────────────────────────────────────────────────────────────────
-log('Discord Sentinel starting...')
-await syncBots()
-watchRegistry()
-log(`Sentinel running — managing ${bots.size} bot(s), owner: ${poolConfig.owner_id || 'any'}`)
+// Guarded so sentinel.test.ts can import the helpers above without booting the
+// daemon. `bun sentinel.ts` (the launchd/systemd entrypoint) still runs all of this.
+if (import.meta.main) {
+  log('Discord Sentinel starting...')
+  await syncBots()
+  watchRegistry()
+  log(`Sentinel running — managing ${bots.size} bot(s), owner: ${poolConfig.owner_id || 'any'}`)
 
-// Notify owner on startup (useful for crash recovery detection via launchd KeepAlive)
-notifyOwner(`Sentinel started — managing ${bots.size} bot(s)`).catch(() => {})
+  // Notify owner on startup (useful for crash recovery detection via launchd KeepAlive)
+  notifyOwner(`Sentinel started — managing ${bots.size} bot(s)`).catch(() => {})
 
-// Auto-sync from plugin cache: record baseline now, then poll every 60s.
-// On a newer version detected, copies runtime files + exits so KeepAlive restarts us.
-checkPluginUpdate().catch(err => log(`Initial plugin-sync check failed: ${err.message}`))
-setInterval(() => {
-  checkPluginUpdate().catch(err => log(`Plugin-sync check failed: ${err.message}`))
-}, PLUGIN_SYNC_INTERVAL_MS)
+  // Auto-sync from plugin cache: record baseline now, then poll every 60s.
+  // On a newer version detected, copies runtime files + exits so KeepAlive restarts us.
+  checkPluginUpdate().catch(err => log(`Initial plugin-sync check failed: ${err.message}`))
+  setInterval(() => {
+    checkPluginUpdate().catch(err => log(`Plugin-sync check failed: ${err.message}`))
+  }, PLUGIN_SYNC_INTERVAL_MS)
+}

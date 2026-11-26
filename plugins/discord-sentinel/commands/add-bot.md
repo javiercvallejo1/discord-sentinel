@@ -95,7 +95,7 @@ Required fields:
 
 Optional fields:
 - `project` (string) — absolute path to project directory. If omitted, uses `_config.default_project`
-- `model` (string) — Claude model to use for this bot's sessions. Accepts tier aliases (`sonnet`, `opus`, `haiku`, `opusplan`) or full model IDs (`claude-fable-5`, `claude-opus-4-8`, etc.). If omitted, inherits from `~/.claude/settings.json`.
+- `model` (string) — Claude model to use for this bot's sessions. Accepts tier aliases (`sonnet`, `opus`, `haiku`, `opusplan`) or full model IDs (`claude-fable-5`, `claude-opus-4-8`, etc.), including a context-window suffix such as `claude-fable-5-1[1m]` — the sentinel shell-quotes the value. If omitted, inherits from `~/.claude/settings.json`.
 
 Example jq command to add directly:
 ```bash

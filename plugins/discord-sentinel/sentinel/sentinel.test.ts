@@ -6,10 +6,21 @@
  * locks/logs/personalities directories as soon as it is imported.
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { spawnSync } from 'child_process'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { claudeLaunchLine, hasResumableSession, projectSessionsDir } from './sentinel.ts'
+import {
+  buildSpawnWrapper,
+  claudeLaunchLine,
+  hasResumableSession,
+  isOwnerDm,
+  launchInScreen,
+  matchScreenSessions,
+  parseRegistry,
+  projectSessionsDir,
+  quitScreen,
+} from './sentinel.ts'
 
 const CLAUDE = '/usr/local/bin/claude'
 const PROJECT = '/Users/someone/Documents/verinext/lsa'
@@ -88,5 +99,186 @@ describe('claudeLaunchLine model pinning', () => {
     expect(claudeLaunchLine(CLAUDE, true, 'opus')).toBe(
       "exec '/usr/local/bin/claude' --model 'opus' --channels plugin:discord@claude-plugins-official --dangerously-skip-permissions --continue"
     )
+  })
+})
+
+// ── Registry parsing ──────────────────────────────────────────────────────────
+const DEFAULTS = { owner_id: '', default_project: '/home/u/Documents' }
+
+describe('parseRegistry', () => {
+  test('returns null for text that is not a JSON object, so the caller keeps its bots', () => {
+    expect(parseRegistry('{ "agent-1": { "token": "t", ', DEFAULTS)).toBeNull()
+    expect(parseRegistry('[]', DEFAULTS)).toBeNull()
+    expect(parseRegistry('', DEFAULTS)).toBeNull()
+  })
+
+  test('splits _config from the bot entries', () => {
+    const parsed = parseRegistry(JSON.stringify({
+      _config: { owner_id: '42', default_project: '/srv/app' },
+      'agent-1': { token: 't1', label: 'agent-1' },
+    }), DEFAULTS)
+    expect(parsed).toEqual({
+      config: { owner_id: '42', default_project: '/srv/app' },
+      bots: { 'agent-1': { token: 't1', label: 'agent-1' } },
+    })
+  })
+
+  test('falls back to the defaults when _config is missing or its project is empty', () => {
+    expect(parseRegistry('{}', DEFAULTS)!.config).toEqual(DEFAULTS)
+    expect(parseRegistry('{"_config":{"owner_id":"","default_project":""}}', DEFAULTS)!.config).toEqual(DEFAULTS)
+  })
+
+  test('an owner cleared in the file is cleared, not replaced by the previous one', () => {
+    const previous = { owner_id: '42', default_project: '/srv/app' }
+    expect(parseRegistry('{"_config":{"owner_id":""}}', previous)!.config.owner_id).toBe('')
+  })
+})
+
+// ── Who may start a session ───────────────────────────────────────────────────
+describe('isOwnerDm', () => {
+  const dm = (id: string, extra = {}) => ({ author: { id }, channel_type: 1, ...extra })
+
+  test('accepts a DM from the owner', () => {
+    expect(isOwnerDm(dm('42'), '42')).toBe(true)
+    expect(isOwnerDm({ author: { id: '42' } }, '42')).toBe(true)
+  })
+
+  test('rejects everyone while no owner is configured', () => {
+    expect(isOwnerDm(dm('42'), '')).toBe(false)
+  })
+
+  test('rejects other users, bots and non-DM channels', () => {
+    expect(isOwnerDm(dm('7'), '42')).toBe(false)
+    expect(isOwnerDm(dm('42', { author: { id: '42', bot: true } }), '42')).toBe(false)
+    expect(isOwnerDm(dm('42', { channel_type: 0 }), '42')).toBe(false)
+  })
+})
+
+// ── Screen sessions ───────────────────────────────────────────────────────────
+describe('matchScreenSessions', () => {
+  const MAC = 'There are screens on:\n\t71706.claude-agent-10\t(Detached)\n\t71703.claude-agent-1\t(Detached)\n2 Sockets in /var/folders/x.\n'
+  const LINUX = 'There is a screen on:\n\t2211.claude-agent-1\t(11/26/2026 01:02:03 PM)\t(Detached)\n1 Socket in /run/screen/S-u.\n'
+
+  test('returns only the session whose name matches exactly, never a longer name with the same prefix', () => {
+    expect(matchScreenSessions(MAC, 'claude-agent-1')).toEqual(['71703.claude-agent-1'])
+    expect(matchScreenSessions(MAC, 'claude-agent-10')).toEqual(['71706.claude-agent-10'])
+    expect(matchScreenSessions(MAC, 'claude-agent')).toEqual([])
+  })
+
+  test('reads the Linux listing, which carries a date column', () => {
+    expect(matchScreenSessions(LINUX, 'claude-agent-1')).toEqual(['2211.claude-agent-1'])
+  })
+
+  test('returns nothing when no session is listed', () => {
+    expect(matchScreenSessions('No Sockets found in /var/folders/x.\n', 'claude-agent-1')).toEqual([])
+  })
+})
+
+// ── Spawn wrapper ─────────────────────────────────────────────────────────────
+const wrapperOptions = (overrides = {}) => ({
+  botName: 'agent-1',
+  config: { token: 'tok', label: 'agent-1' },
+  project: '/srv/app',
+  channelDir: '/home/u/.claude/channels/discord-agent-1',
+  claudeBin: CLAUDE,
+  ownerId: '42',
+  lockPath: '/home/u/.claude/discord-sentinel/locks/agent-1.lock',
+  resume: false,
+  ...overrides,
+})
+
+describe('buildSpawnWrapper', () => {
+  test('records its own PID as the lock, atomically, after entering the project and before exec', () => {
+    const lines = buildSpawnWrapper(wrapperOptions()).split('\n')
+    const cd = lines.findIndex(l => l.startsWith("cd '/srv/app' ||"))
+    const lock = lines.indexOf(
+      "echo $$ > '/home/u/.claude/discord-sentinel/locks/agent-1.lock.tmp' && " +
+      "mv '/home/u/.claude/discord-sentinel/locks/agent-1.lock.tmp' '/home/u/.claude/discord-sentinel/locks/agent-1.lock'"
+    )
+    const exec = lines.findIndex(l => l.startsWith('exec '))
+    expect(cd).toBeGreaterThan(0)
+    expect(lock).toBeGreaterThan(cd)
+    expect(exec).toBeGreaterThan(lock)
+  })
+
+  test('exports the approval variables only when the bot has an approval channel', () => {
+    expect(buildSpawnWrapper(wrapperOptions())).not.toContain('DISCORD_APPROVE_')
+    const withApproval = buildSpawnWrapper(wrapperOptions({ config: { token: 'tok', label: 'agent-1', approval_channel: '99' } }))
+    expect(withApproval).toContain("export DISCORD_APPROVE_CHANNEL_ID='99'")
+    expect(withApproval).toContain("export DISCORD_APPROVE_USER_ID='42'")
+  })
+})
+
+// ── Launching in screen (needs the real `screen` binary) ─────────────────────
+const hasScreen = spawnSync('screen', ['-v']).error === undefined
+const alive = (pid: number) => { try { process.kill(pid, 0); return true } catch { return false } }
+const listed = (screenName: string) =>
+  matchScreenSessions(spawnSync('screen', ['-ls']).stdout.toString(), screenName)
+
+describe.skipIf(!hasScreen)('launchInScreen', () => {
+  let dir: string
+  let fakeClaude: string
+  let pids: number[]
+  const name = `claude-zztest${process.pid}`
+  const sibling = `${name}0`  // shares the prefix, like agent-1 and agent-10
+
+  const launch = async (screenName: string, bin = fakeClaude) => {
+    const lockPath = join(dir, `${screenName}.lock`)
+    const wrapper = join(dir, `spawn-${screenName}.sh`)
+    writeFileSync(wrapper, buildSpawnWrapper(wrapperOptions({ project: dir, claudeBin: bin, lockPath })), { mode: 0o700 })
+    const pid = await launchInScreen(screenName, wrapper, lockPath, 6)
+    if (pid) pids.push(pid)
+    return pid
+  }
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'sentinel-screen-'))
+    fakeClaude = join(dir, 'fake-claude')
+    // Stands in for claude: stays alive, as one process, until the test ends it.
+    writeFileSync(fakeClaude, '#!/bin/bash\nread -t 30\n', { mode: 0o755 })
+    pids = []
+  })
+  afterEach(() => {
+    quitScreen(name)
+    quitScreen(sibling)
+    for (const pid of pids) { try { process.kill(pid, 'SIGKILL') } catch {} }
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  test('returns the PID of the launched process and leaves it in the lock file', async () => {
+    const pid = await launch(name)
+    expect(pid).not.toBeNull()
+    expect(alive(pid!)).toBe(true)
+    expect(readFileSync(join(dir, `${name}.lock`), 'utf8').trim()).toBe(String(pid))
+    // The wrapper's own PID became the launched program through exec.
+    expect(spawnSync('ps', ['-o', 'command=', '-p', String(pid)]).stdout.toString())
+      .toContain(`${fakeClaude} --channels`)
+  })
+
+  test('returns null and leaves no lock or session when the process dies at once', async () => {
+    const dying = join(dir, 'dying-claude')
+    writeFileSync(dying, '#!/bin/bash\nexit 1\n', { mode: 0o755 })
+    expect(await launch(name, dying)).toBeNull()
+    expect(existsSync(join(dir, `${name}.lock`))).toBe(false)
+    expect(listed(name)).toEqual([])
+  })
+
+  test('quitting a session ends it and leaves a session with a longer, same-prefix name running', async () => {
+    const pid = await launch(name)
+    const siblingPid = await launch(sibling)
+    expect(pid).not.toBeNull()
+    expect(siblingPid).not.toBeNull()
+    quitScreen(name)
+    expect(listed(name)).toEqual([])
+    expect(listed(sibling)).toHaveLength(1)
+    expect(alive(siblingPid!)).toBe(true)
+  })
+
+  test('quitting a session that is not running leaves the same-prefix session alone', async () => {
+    const siblingPid = await launch(sibling)
+    expect(siblingPid).not.toBeNull()
+    quitScreen(name)
+    expect(listed(sibling)).toHaveLength(1)
+    expect(alive(siblingPid!)).toBe(true)
   })
 })

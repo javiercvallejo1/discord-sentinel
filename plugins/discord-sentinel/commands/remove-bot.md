@@ -2,7 +2,7 @@
 name: remove-bot
 description: Unregister a Discord bot from the sentinel pool
 allowed_tools: ["Bash", "Read"]
-args: "<name>"
+argument-hint: "<name>"
 ---
 
 # Remove Bot from Sentinel Pool

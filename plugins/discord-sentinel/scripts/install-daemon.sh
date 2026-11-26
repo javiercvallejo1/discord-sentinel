@@ -41,14 +41,19 @@ BUN_PATH=$(which bun)
 
 # ── Create sentinel directory ───────────────────────────────────────────────
 mkdir -p "${SENTINEL_DIR}"/{locks,logs,personalities}
+# bots.json and the spawn wrappers hold bot tokens: keep the directory private.
+chmod 700 "${SENTINEL_DIR}"
 
 # ── Copy sentinel files ─────────────────────────────────────────────────────
 cp "${PLUGIN_ROOT}/sentinel/sentinel.ts" "${SENTINEL_DIR}/sentinel.ts"
 cp "${PLUGIN_ROOT}/sentinel/sentinel-lock.sh" "${SENTINEL_DIR}/sentinel-lock.sh"
 chmod +x "${SENTINEL_DIR}/sentinel-lock.sh"
 
-# Copy package.json for dependencies
+# Copy package.json and the lockfile for dependencies
 cp "${PLUGIN_ROOT}/package.json" "${SENTINEL_DIR}/package.json"
+if [ -f "${PLUGIN_ROOT}/bun.lock" ]; then
+  cp "${PLUGIN_ROOT}/bun.lock" "${SENTINEL_DIR}/bun.lock"
+fi
 
 # Copy approval hook
 cp "${PLUGIN_ROOT}/scripts/discord-approve.sh" "${SENTINEL_DIR}/discord-approve.sh"
@@ -71,8 +76,9 @@ if [ ! -f "${SENTINEL_DIR}/bots.json" ]; then
   }
 }
 BOTS
-  echo "Created empty bots.json — configure owner_id after adding your first bot."
+  echo "Created empty bots.json — set owner_id before you DM a bot: without it every DM is ignored."
 fi
+chmod 600 "${SENTINEL_DIR}/bots.json"
 
 # ── Install dependencies ────────────────────────────────────────────────────
 echo "Installing dependencies..."

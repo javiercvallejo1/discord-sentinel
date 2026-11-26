@@ -2,7 +2,7 @@
 name: sentinel
 description: Manage the sentinel daemon — start, stop, status, or view logs
 allowed_tools: ["Bash", "Read"]
-args: "<start|stop|status|logs>"
+argument-hint: "<start|stop|status|logs>"
 ---
 
 # Sentinel Daemon Management

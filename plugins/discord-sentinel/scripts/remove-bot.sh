@@ -13,6 +13,14 @@ set -euo pipefail
 SENTINEL_DIR="${HOME}/.claude/discord-sentinel"
 BOTS_FILE="${SENTINEL_DIR}/bots.json"
 
+# `screen -S <name>` matches by prefix, so quitting "claude-agent-1" can hit
+# "claude-agent-10". Quit only the sessions whose name matches exactly.
+quit_screen() {
+  { screen -ls 2>/dev/null || true; } \
+    | awk -v want=".$1" 'index($1, ".") && substr($1, index($1, ".")) == want { print $1 }' \
+    | while read -r id; do screen -S "$id" -X quit 2>/dev/null || true; done
+}
+
 if [ $# -lt 1 ]; then
   echo "Usage: remove-bot <name>"
   echo ""
@@ -34,11 +42,11 @@ if [ -f "$LOCK" ]; then
   PID=$(cat "$LOCK")
   kill "$PID" 2>/dev/null || true
   rm -f "$LOCK"
-  screen -S "claude-${NAME}" -X quit 2>/dev/null || true
+  quit_screen "claude-${NAME}"
   echo "Killed active session for '$NAME'."
 fi
 
-jq --arg name "$NAME" 'del(.[$name])' "$BOTS_FILE" > "${BOTS_FILE}.tmp" \
+( umask 077; jq --arg name "$NAME" 'del(.[$name])' "$BOTS_FILE" > "${BOTS_FILE}.tmp" ) \
   && mv "${BOTS_FILE}.tmp" "$BOTS_FILE"
 
 echo "Removed '$NAME' from pool. Sentinel will disconnect within seconds."

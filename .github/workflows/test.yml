@@ -1,0 +1,19 @@
+name: test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: plugins/discord-sentinel
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: sudo apt-get update && sudo apt-get install -y screen
+      - run: bun install --frozen-lockfile
+      - run: SENTINEL_DIR=$(mktemp -d) bun test

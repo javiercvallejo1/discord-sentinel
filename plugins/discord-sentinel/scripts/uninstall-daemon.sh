@@ -7,6 +7,14 @@ set -euo pipefail
 SENTINEL_DIR="${HOME}/.claude/discord-sentinel"
 OS="$(uname -s)"
 
+# `screen -S <name>` matches by prefix, so quitting "claude-agent-1" can hit
+# "claude-agent-10". Quit only the sessions whose name matches exactly.
+quit_screen() {
+  { screen -ls 2>/dev/null || true; } \
+    | awk -v want=".$1" 'index($1, ".") && substr($1, index($1, ".")) == want { print $1 }' \
+    | while read -r id; do screen -S "$id" -X quit 2>/dev/null || true; done
+}
+
 echo "Uninstalling Discord Sentinel daemon..."
 
 case "${OS}" in
@@ -50,7 +58,7 @@ for lock in "${SENTINEL_DIR}"/locks/*.lock; do
   pid=$(cat "$lock" 2>/dev/null)
   kill "$pid" 2>/dev/null || true
   botname=$(basename "$lock" .lock)
-  screen -S "claude-${botname}" -X quit 2>/dev/null || true
+  quit_screen "claude-${botname}"
 done
 
 echo ""

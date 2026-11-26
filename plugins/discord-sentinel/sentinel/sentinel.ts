@@ -34,7 +34,7 @@ import {
   copyFileSync,
   chmodSync,
 } from 'fs'
-import { execSync } from 'child_process'
+import { execFileSync } from 'child_process'
 import { homedir } from 'os'
 import { join } from 'path'
 
@@ -63,7 +63,7 @@ interface BotConfig {
   project?: string
   label: string
   approval_channel?: string
-  timeout_hours?: number  // Auto-kill after N hours of inactivity (default: 4)
+  timeout_hours?: number  // Kill the session N hours after it started. Omit or 0 to disable (default)
   auto_recover_rate_limit?: boolean  // Auto-recover when Claude rate-limit prompt blocks the session (default: true)
   model?: string  // Optional: passed to claude --model. Omit to inherit from ~/.claude/settings.json. Examples: "sonnet", "opus", "opusplan", "claude-fable-5"
 }
@@ -114,13 +114,7 @@ function log(msg: string) {
 async function notifyOwner(message: string, viaBot?: BotConfig) {
   if (!poolConfig.owner_id) return
 
-  let token: string | null = null
-  if (viaBot) {
-    token = viaBot.token
-  } else {
-    const { bots: registry } = loadBots()
-    token = Object.values(registry)[0]?.token ?? null
-  }
+  const token = viaBot?.token ?? bots.values().next().value?.config.token
   if (!token) return
 
   try {
@@ -144,6 +138,39 @@ async function notifyOwner(message: string, viaBot?: BotConfig) {
     })
   } catch (err: any) {
     log(`Health notification failed: ${err.message}`)
+  }
+}
+
+// ── Screen sessions ────────────────────────────────────────────────────────────
+// `screen -S <name>` matches by prefix. With bots agent-1 and agent-10, a command
+// for "claude-agent-1" lands on agent-10 when agent-1 is not running and is
+// refused as ambiguous when both are. Sessions are therefore looked up by exact
+// name in `screen -ls` and addressed by their full <pid>.<name> id.
+const screenNameFor = (botName: string) => `claude-${botName}`
+
+export function matchScreenSessions(lsOutput: string, screenName: string): string[] {
+  const ids: string[] = []
+  for (const line of lsOutput.split('\n')) {
+    const m = line.match(/^\s*(\d+)\.(\S+)/)
+    if (m && m[2] === screenName) ids.push(`${m[1]}.${m[2]}`)
+  }
+  return ids
+}
+
+function screenSessions(screenName: string): string[] {
+  let listing = ''
+  try {
+    listing = execFileSync('screen', ['-ls'], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] })
+  } catch (err: any) {
+    // `screen -ls` exits non-zero on some versions even when it lists sessions.
+    listing = err.stdout?.toString() ?? ''
+  }
+  return matchScreenSessions(listing, screenName)
+}
+
+export function quitScreen(screenName: string) {
+  for (const id of screenSessions(screenName)) {
+    try { execFileSync('screen', ['-S', id, '-X', 'quit'], { timeout: 5000, stdio: 'ignore' }) } catch {}
   }
 }
 
@@ -182,10 +209,11 @@ function stripAnsi(s: string): string {
  * (screen not available, capture failed, regex no match).
  */
 function detectRateLimit(botName: string): boolean {
-  const screenName = `claude-${botName}`
-  const captureFile = join('/tmp', `sentinel-rl-${botName}.txt`)
+  const [session] = screenSessions(screenNameFor(botName))
+  if (!session) return false
+  const captureFile = join(LOCKS_DIR, `rl-${botName}.txt`)
   try {
-    execSync(`screen -S '${screenName}' -p 0 -X hardcopy '${captureFile}'`, { timeout: 5000 })
+    execFileSync('screen', ['-S', session, '-p', '0', '-X', 'hardcopy', captureFile], { timeout: 5000, stdio: 'ignore' })
   } catch {
     return false
   }
@@ -203,18 +231,22 @@ function detectRateLimit(botName: string): boolean {
 
 /**
  * Recover from a stuck rate-limit prompt: notify owner via the affected bot's
- * own DM, kill the claude PID, drop the lock, quit the screen session.
- * The lock-monitor's existing reclaim path then brings the bot back to idle
- * gateway mode. Honors a per-bot cooldown to avoid notification storms.
+ * own DM, then end the session. The lock-monitor's existing reclaim path brings
+ * the bot back to idle gateway mode. The per-bot cooldown limits the
+ * notification only: a session stuck on the prompt is always ended.
  */
 async function recoverFromRateLimit(botName: string, state: BotState) {
   const now = Date.now()
   const last = state.rateLimitLastNotifyAt ?? 0
-  if (now - last < RATE_LIMIT_NOTIFY_COOLDOWN_MS) return
+  log(`[${botName}] Rate-limit prompt detected — recovering`)
+  if (now - last >= RATE_LIMIT_NOTIFY_COOLDOWN_MS) {
+    state.rateLimitLastNotifyAt = now
+    await notifyOwnerOfRateLimit(botName, state)
+  }
+  killSession(botName)
+}
 
-  state.rateLimitLastNotifyAt = now
-  log(`[${botName}] Rate-limit prompt detected — notifying owner and recovering`)
-
+async function notifyOwnerOfRateLimit(botName: string, state: BotState) {
   const message =
     `⚠️ **${state.config.label}** topó con el rate-limit de Claude y la sesión quedó plantada en el menú de opciones.\n\n` +
     `Liberé el gateway: maté el proceso atascado, el bot vuelve a idle. Cuando el límite se libere y me mandes un DM, ` +
@@ -225,20 +257,6 @@ async function recoverFromRateLimit(botName: string, state: BotState) {
   } catch (err: any) {
     log(`[${botName}] Rate-limit notify failed: ${err.message}`)
   }
-
-  // Kill the claude PID
-  try {
-    const content = readFileSync(getLockPath(botName), 'utf8').trim()
-    const pid = parseInt(content, 10)
-    if (!isNaN(pid)) {
-      process.kill(pid, 'SIGTERM')
-      log(`[${botName}] Sent SIGTERM to PID ${pid}`)
-    }
-  } catch {}
-
-  // Drop lock + quit screen — lock monitor's stale-lock path will reclaim gateway on next tick
-  try { unlinkSync(getLockPath(botName)) } catch {}
-  try { execSync(`screen -S 'claude-${botName}' -X quit 2>/dev/null`) } catch {}
 }
 
 // ── Auto-sync from plugin cache ────────────────────────────────────────────────
@@ -485,15 +503,23 @@ function getLockPath(botName: string): string {
   return join(LOCKS_DIR, `${botName}.lock`)
 }
 
+function readPid(lockPath: string): number | null {
+  try {
+    const pid = parseInt(readFileSync(lockPath, 'utf8').trim(), 10)
+    return isNaN(pid) ? null : pid
+  } catch {
+    return null
+  }
+}
+
 function isSessionActive(botName: string): boolean {
   const lockPath = getLockPath(botName)
 
   try {
     if (!existsSync(lockPath)) return false
 
-    const content = readFileSync(lockPath, 'utf8').trim()
-    const pid = parseInt(content, 10)
-    if (isNaN(pid)) {
+    const pid = readPid(lockPath)
+    if (pid === null) {
       unlinkSync(lockPath)
       return false
     }
@@ -505,7 +531,7 @@ function isSessionActive(botName: string): boolean {
       if (err.code === 'ESRCH') {
         log(`[${botName}] Stale lock (PID ${pid} dead) — cleaning up`)
         unlinkSync(lockPath)
-        try { execSync(`screen -S claude-${botName} -X quit 2>/dev/null`) } catch {}
+        quitScreen(screenNameFor(botName))
         return false
       }
       if (err.code === 'EPERM') return true
@@ -516,9 +542,20 @@ function isSessionActive(botName: string): boolean {
   }
 }
 
-function createLock(botName: string, pid: number) {
-  writeFileSync(getLockPath(botName), `${pid}\n`)
-  log(`[${botName}] Lock created (PID ${pid})`)
+/**
+ * End a bot's session: SIGTERM the locked PID, drop the lock, quit its screen.
+ * The lock monitor reclaims the gateway on its next tick.
+ */
+function killSession(botName: string) {
+  const pid = readPid(getLockPath(botName))
+  if (pid !== null) {
+    try {
+      process.kill(pid, 'SIGTERM')
+      log(`[${botName}] Sent SIGTERM to PID ${pid}`)
+    } catch {}
+  }
+  try { unlinkSync(getLockPath(botName)) } catch {}
+  quitScreen(screenNameFor(botName))
 }
 
 function removeLock(botName: string) {
@@ -574,13 +611,92 @@ export function claudeLaunchLine(claudeBin: string, resume: boolean, model?: str
 }
 
 // ── Session spawning ───────────────────────────────────────────────────────────
+export interface SpawnWrapperOptions {
+  botName: string
+  config: BotConfig
+  project: string
+  channelDir: string
+  claudeBin: string
+  ownerId: string
+  lockPath: string
+  resume: boolean
+}
+
+/**
+ * The script screen runs for a session: env vars for personality and approval,
+ * the project dir, the lock, then claude.
+ */
+export function buildSpawnWrapper(o: SpawnWrapperOptions): string {
+  const lines = [
+    '#!/bin/bash',
+    'export PATH="$HOME/.bun/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"',
+    `export DISCORD_BOT_TOKEN='${sq(o.config.token)}'`,
+    `export DISCORD_BOT_NAME='${sq(o.botName)}'`,
+    `export DISCORD_STATE_DIR='${sq(o.channelDir)}'`,
+    `export CLAUDE_PROJECT_DIR='${sq(o.project)}'`,
+  ]
+
+  // Set approval hook env vars if approval_channel is configured
+  if (o.config.approval_channel) {
+    lines.push(
+      `export DISCORD_APPROVE_BOT_TOKEN='${sq(o.config.token)}'`,
+      `export DISCORD_APPROVE_CHANNEL_ID='${sq(o.config.approval_channel)}'`,
+      `export DISCORD_APPROVE_USER_ID='${sq(o.ownerId)}'`,
+    )
+  }
+
+  // Guarantee the project dir exists and that we actually entered it before exec.
+  // bots.json can be hand-edited (the docs show a direct jq path that skips
+  // add-bot.sh's mkdir) and dirs can be removed after registration. An unguarded
+  // `cd` to a missing dir fails silently, leaving claude to launch in the sentinel
+  // dir where it blocks on a workspace-trust prompt inside a headless screen.
+  //
+  // The lock is the wrapper's own PID, which `exec` hands to claude. It is written
+  // to a temp name and renamed so the lock monitor never reads a half-written file.
+  const lock = sq(o.lockPath)
+  lines.push(
+    `mkdir -p '${sq(o.project)}'`,
+    `cd '${sq(o.project)}' || { echo '[sentinel] project dir unavailable, aborting' >&2; exit 1; }`,
+    `echo $$ > '${lock}.tmp' && mv '${lock}.tmp' '${lock}'`,
+    claudeLaunchLine(o.claudeBin, o.resume, o.config.model),
+  )
+  return lines.join('\n') + '\n'
+}
+
+/**
+ * Start the wrapper in a detached screen and wait for the lock it writes.
+ * Returns the PID of the running session, or null when none came up.
+ */
+export async function launchInScreen(
+  screenName: string,
+  wrapperScript: string,
+  lockPath: string,
+  attempts = 15,
+): Promise<number | null> {
+  quitScreen(screenName)  // An orphan with the same name would shadow the new session
+  try { unlinkSync(lockPath) } catch {}
+
+  execFileSync('screen', ['-dmS', screenName, wrapperScript], { timeout: 10000, stdio: 'ignore' })
+
+  for (let i = 0; i < attempts; i++) {
+    await new Promise(r => setTimeout(r, 500))
+    const pid = readPid(lockPath)
+    if (pid === null) continue
+    try {
+      process.kill(pid, 0)
+      return pid
+    } catch (err: any) {
+      if (err.code === 'EPERM') return pid
+    }
+  }
+
+  quitScreen(screenName)
+  try { unlinkSync(lockPath) } catch {}
+  return null
+}
+
 async function spawnSession(botName: string, config: BotConfig): Promise<number | null> {
   const project = config.project || poolConfig.default_project
-  const channelDir = join(CHANNELS_DIR, `discord-${botName}`)
-  const screenName = `claude-${botName}`
-
-  // Kill any orphaned screen with the same name
-  try { execSync(`screen -S ${screenName} -X quit 2>/dev/null`) } catch {}
 
   // Resolve claude binary — check common locations
   const claudePaths = [
@@ -593,94 +709,44 @@ async function spawnSession(botName: string, config: BotConfig): Promise<number 
     if (existsSync(p)) { claudeBin = p; break }
   }
 
-  // Generate spawn wrapper with env vars for personality + approval
-  const wrapperScript = join(LOCKS_DIR, `spawn-${botName}.sh`)
-  const wrapperLines = [
-    '#!/bin/bash',
-    'export PATH="$HOME/.bun/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"',
-    `export DISCORD_BOT_TOKEN='${sq(config.token)}'`,
-    `export DISCORD_BOT_NAME='${sq(botName)}'`,
-    `export DISCORD_STATE_DIR='${sq(channelDir)}'`,
-    `export CLAUDE_PROJECT_DIR='${sq(project)}'`,
-  ]
-
-  // Set approval hook env vars if approval_channel is configured
-  if (config.approval_channel) {
-    wrapperLines.push(
-      `export DISCORD_APPROVE_BOT_TOKEN='${sq(config.token)}'`,
-      `export DISCORD_APPROVE_CHANNEL_ID='${sq(config.approval_channel)}'`,
-      `export DISCORD_APPROVE_USER_ID='${sq(poolConfig.owner_id)}'`,
-    )
-  }
-
   // See "Session resume detection" above for why --continue is conditional.
   const resume = hasResumableSession(project)
   log(`[${botName}] ${resume ? 'Resuming saved conversation (--continue)' : 'No saved conversation for this project — starting fresh'}${config.model ? ` · model ${config.model}` : ''}`)
 
-  // Guarantee the project dir exists and that we actually entered it before exec.
-  // bots.json can be hand-edited (the docs show a direct jq path that skips
-  // add-bot.sh's mkdir) and dirs can be removed after registration. An unguarded
-  // `cd` to a missing dir fails silently, leaving claude to launch in the sentinel
-  // dir where it blocks on a workspace-trust prompt inside a headless screen.
-  wrapperLines.push(
-    `mkdir -p '${sq(project)}'`,
-    `cd '${sq(project)}' || { echo '[sentinel] project dir unavailable, aborting' >&2; exit 1; }`,
-    claudeLaunchLine(claudeBin, resume, config.model),
-  )
-  writeFileSync(wrapperScript, wrapperLines.join('\n'), { mode: 0o700 })
+  const wrapperScript = join(LOCKS_DIR, `spawn-${botName}.sh`)
+  writeFileSync(wrapperScript, buildSpawnWrapper({
+    botName,
+    config,
+    project,
+    channelDir: join(CHANNELS_DIR, `discord-${botName}`),
+    claudeBin,
+    ownerId: poolConfig.owner_id,
+    lockPath: getLockPath(botName),
+    resume,
+  }), { mode: 0o700 })
 
   try {
-    execSync(`screen -dmS '${screenName}' '${wrapperScript}'`, { timeout: 10000 })
-    log(`[${botName}] Screen session '${screenName}' spawned`)
-
-    // Find the claude PID
-    let pid: number | null = null
-    for (let i = 0; i < 15; i++) {
-      await new Promise(r => setTimeout(r, 500))
-      try {
-        const screenPid = execSync(
-          `screen -ls | grep "\\.${screenName}\\b" | awk -F. '{print $1}' | tr -d '\\t ' | head -1`,
-          { encoding: 'utf8' }
-        ).trim()
-        if (!screenPid) continue
-
-        const result = execSync(
-          `pgrep -P $(pgrep -P ${screenPid} | head -1) -f claude 2>/dev/null || pgrep -P ${screenPid} -f claude 2>/dev/null || true`,
-          { encoding: 'utf8' }
-        ).trim()
-        if (result) {
-          pid = parseInt(result.split('\n')[0], 10)
-          if (!isNaN(pid)) break
-        }
-      } catch {}
-    }
-
-    if (pid) {
-      log(`[${botName}] Claude process detected (PID ${pid})`)
-      return pid
-    } else {
-      log(`[${botName}] Could not detect Claude PID — checking screen session`)
-      try {
-        const screenPid = execSync(
-          `screen -ls | grep "\\.${screenName}\\b" | awk -F. '{print $1}' | tr -d '\\t ' | head -1`,
-          { encoding: 'utf8' }
-        ).trim()
-        if (screenPid) {
-          const childPid = execSync(`pgrep -P ${screenPid} | head -1`, { encoding: 'utf8' }).trim()
-          if (childPid) {
-            pid = parseInt(childPid, 10)
-            log(`[${botName}] Using screen child PID ${pid} as lock`)
-            return pid
-          }
-        }
-      } catch {}
-      log(`[${botName}] Screen session not found — spawn may have failed`)
-      return null
-    }
+    const pid = await launchInScreen(screenNameFor(botName), wrapperScript, getLockPath(botName))
+    log(pid
+      ? `[${botName}] Session running in screen '${screenNameFor(botName)}' (PID ${pid})`
+      : `[${botName}] No live session after spawn — it exited or never started`)
+    return pid
   } catch (err: any) {
     log(`[${botName}] Spawn failed: ${err.message}`)
     return null
   }
+}
+
+/**
+ * True for a DM from the configured owner. With no owner configured nobody
+ * qualifies: anyone who shares a server with the bot can DM it, and a DM starts
+ * a session that runs without permission prompts.
+ */
+export function isOwnerDm(data: any, ownerId: string): boolean {
+  if (!ownerId) return false
+  if (data.author?.bot) return false
+  if (data.channel_type !== undefined && data.channel_type !== 1) return false // 1 = DM
+  return data.author?.id === ownerId
 }
 
 // ── Bot management ─────────────────────────────────────────────────────────────
@@ -710,7 +776,7 @@ function createClient(botName: string, config: BotConfig): Client {
     })
   }
 
-  client.once('ready', c => {
+  client.once('clientReady', c => {
     log(`[${botName}] Connected as ${c.user.tag} — idle mode`)
     applyIdlePresence()
   })
@@ -726,9 +792,7 @@ function createClient(botName: string, config: BotConfig): Client {
   // channel resolution bug. Use the raw websocket handler instead, then fetch
   // the full Message object from the API.
   client.ws.on(GatewayDispatchEvents.MessageCreate, async (data: any) => {
-    if (data.author?.bot) return
-    if (data.channel_type !== undefined && data.channel_type !== 1) return // 1 = DM
-    if (poolConfig.owner_id && data.author?.id !== poolConfig.owner_id) return
+    if (!isOwnerDm(data, poolConfig.owner_id)) return
 
     const state = bots.get(botName)
     if (!state || state.status !== 'idle') return
@@ -739,41 +803,50 @@ function createClient(botName: string, config: BotConfig): Client {
     spawnCooldown.set(botName, now)
 
     state.status = 'spawning'
+    let pid: number | null = null
 
     try {
       // Fetch full channel and message so we can reply
       const channel = await client.channels.fetch(data.channel_id)
-      if (!channel || !('messages' in channel)) { state.status = 'idle'; return }
-      const msg = await (channel as any).messages.fetch(data.id)
+      if (channel && 'messages' in channel) {
+        const msg = await (channel as any).messages.fetch(data.id)
 
-      await msg.reply(
-        `Starting session for **${config.label}**... send your request in a moment.\n\nSend **/sleep** to end the session.`
-      )
-      log(`[${botName}] DM from ${data.author.username} — spawning session`)
+        // state.config, not the config this client was created with: bots.json
+        // may have been reloaded since.
+        await msg.reply(
+          `Starting session for **${state.config.label}**... send your request in a moment.\n\nSend **/sleep** to end the session.`
+        )
+        log(`[${botName}] DM from ${data.author.username} — spawning session`)
 
-      // MUST disconnect BEFORE spawning. With async sleep (non-blocking),
-      // discord.js processes "kicked off" events and auto-reconnects, creating
-      // a reconnection war with Claude's discord plugin. Disconnecting first
-      // (client.destroy()) prevents auto-reconnect entirely.
-      // The working hand-built version avoided this because Bun.sleepSync
-      // blocked the event loop, preventing discord.js from reconnecting.
-      await disconnectBot(botName, state)
-      state.status = 'spawning' // Re-set after disconnectBot resets to 'idle'
+        // MUST disconnect BEFORE spawning. With async sleep (non-blocking),
+        // discord.js processes "kicked off" events and auto-reconnects, creating
+        // a reconnection war with Claude's discord plugin. Disconnecting first
+        // (client.destroy()) prevents auto-reconnect entirely.
+        // The working hand-built version avoided this because Bun.sleepSync
+        // blocked the event loop, preventing discord.js from reconnecting.
+        await disconnectBot(botName, state)
+        state.status = 'spawning' // Re-set after disconnectBot resets to 'idle'
 
-      const pid = await spawnSession(botName, config)
-
-      if (pid) {
-        createLock(botName, pid)
-        state.status = 'active'
-        state.sessionStartedAt = Date.now()
-      } else {
-        // Spawn failed — reclaim the gateway
-        log(`[${botName}] Spawn failed — reclaiming gateway`)
-        await connectBot(botName, state)
+        pid = await spawnSession(botName, state.config)
       }
     } catch (err: any) {
       log(`[${botName}] Spawn error: ${err.message}`)
-      state.status = 'idle'
+    }
+
+    if (pid) {
+      state.status = 'active'
+      state.sessionStartedAt = Date.now()
+      return
+    }
+
+    // No session came up. Leave 'spawning' first, or connectBot's guard returns
+    // at once and the bot stays offline until the daemon restarts.
+    // Only while this bot is still registered: it may have been removed from
+    // bots.json during the spawn, and a client for it would belong to nobody.
+    state.status = 'idle'
+    if (!state.client && bots.get(botName) === state) {
+      log(`[${botName}] Spawn failed — reclaiming gateway`)
+      await connectBot(botName, state)
     }
   })
 
@@ -790,6 +863,11 @@ async function connectBot(botName: string, state: BotState): Promise<void> {
   if (isSessionActive(botName)) {
     log(`[${botName}] Active session detected — staying disconnected`)
     state.status = 'active'
+    // The lock monitor's timeout and rate-limit checks need a start time; a
+    // session that predates this daemon gets its lock's.
+    if (!state.sessionStartedAt) {
+      try { state.sessionStartedAt = statSync(getLockPath(botName)).mtimeMs } catch { state.sessionStartedAt = Date.now() }
+    }
     return
   }
 
@@ -820,13 +898,16 @@ async function connectBot(botName: string, state: BotState): Promise<void> {
 }
 
 async function disconnectBot(botName: string, state: BotState): Promise<void> {
-  if (!state.client) return
-
-  state.status = 'disconnecting'
+  // A pending login retry belongs to the old client: cancel it, and leave
+  // 'errored' so the caller can connect again (connectBot refuses that status).
   if (state.retryTimer) {
     clearTimeout(state.retryTimer)
     state.retryTimer = null
+    if (state.status === 'errored') state.status = 'idle'
   }
+  if (!state.client) return
+
+  state.status = 'disconnecting'
 
   try {
     state.client.destroy()
@@ -876,13 +957,7 @@ function startLockMonitor(botName: string, state: BotState) {
         const elapsed = (Date.now() - state.sessionStartedAt) / (1000 * 60 * 60)
         if (elapsed >= timeoutHours) {
           log(`[${botName}] Session timed out after ${timeoutHours}h — killing`)
-          try {
-            const content = readFileSync(getLockPath(botName), 'utf8').trim()
-            const pid = parseInt(content, 10)
-            if (!isNaN(pid)) process.kill(pid, 'SIGTERM')
-          } catch {}
-          try { unlinkSync(getLockPath(botName)) } catch {}
-          try { execSync(`screen -S claude-${botName} -X quit 2>/dev/null`) } catch {}
+          killSession(botName)
         }
       }
 
@@ -909,24 +984,53 @@ function stopLockMonitor(state: BotState) {
 }
 
 // ── Registry management ────────────────────────────────────────────────────────
-function loadBots(): { config: PoolConfig; bots: Record<string, BotConfig> } {
-  try {
-    const raw = JSON.parse(readFileSync(BOTS_FILE, 'utf8'))
-    const { _config, ...botEntries } = raw
-    const config: PoolConfig = {
-      owner_id: _config?.owner_id ?? poolConfig.owner_id,
-      default_project: _config?.default_project ?? poolConfig.default_project,
-    }
-    return { config, bots: botEntries }
-  } catch {
-    log('No bots.json found or invalid — empty registry')
-    return { config: poolConfig, bots: {} }
+interface Registry {
+  config: PoolConfig
+  bots: Record<string, BotConfig>
+}
+
+/** Parse bots.json. Returns null when the text is not a JSON object. */
+export function parseRegistry(text: string, defaults: PoolConfig): Registry | null {
+  let raw: any
+  try { raw = JSON.parse(text) } catch { return null }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const { _config, ...botEntries } = raw
+  return {
+    config: {
+      owner_id: _config?.owner_id ?? defaults.owner_id,
+      default_project: _config?.default_project || defaults.default_project,
+    },
+    bots: botEntries,
   }
 }
 
+function loadBots(): Registry | null {
+  let text: string
+  try {
+    text = readFileSync(BOTS_FILE, 'utf8')
+  } catch {
+    log('No bots.json found — empty registry')
+    return { config: poolConfig, bots: {} }
+  }
+  return parseRegistry(text, poolConfig)
+}
+
 async function syncBots() {
-  const { config, bots: registry } = loadBots()
+  const loaded = loadBots()
+  if (!loaded) {
+    // A typo in a hand edit must not take every bot offline.
+    log('bots.json is not valid JSON — keeping the current bots until it is fixed')
+    return
+  }
+  const { config, bots: registry } = loaded
   poolConfig = config
+  if (!poolConfig.owner_id) log('owner_id is not set in bots.json — DMs are ignored until it is')
+
+  // bots.json holds the bot tokens. Only tighten a mode that needs it: a chmod
+  // is itself a change the registry watcher reacts to.
+  try {
+    if (statSync(BOTS_FILE).mode & 0o077) chmodSync(BOTS_FILE, 0o600)
+  } catch {}
   const registryNames = new Set(Object.keys(registry))
 
   for (const [name, state] of bots) {
@@ -1008,9 +1112,10 @@ process.on('SIGTERM', shutdown)
 // daemon. `bun sentinel.ts` (the launchd/systemd entrypoint) still runs all of this.
 if (import.meta.main) {
   log('Discord Sentinel starting...')
+  try { chmodSync(SENTINEL_DIR, 0o700) } catch {}  // tokens live here: bots.json and the spawn wrappers
   await syncBots()
   watchRegistry()
-  log(`Sentinel running — managing ${bots.size} bot(s), owner: ${poolConfig.owner_id || 'any'}`)
+  log(`Sentinel running — managing ${bots.size} bot(s), owner: ${poolConfig.owner_id || 'not set — DMs ignored'}`)
 
   // Notify owner on startup (useful for crash recovery detection via launchd KeepAlive)
   notifyOwner(`Sentinel started — managing ${bots.size} bot(s)`).catch(() => {})

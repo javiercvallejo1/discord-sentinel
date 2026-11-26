@@ -65,8 +65,11 @@ Also ask for their default project directory (suggest the current working direct
 
 Then update bots.json with both values:
 ```bash
-jq --arg id "<USER_ID>" --arg project "<PROJECT_DIR>" '._config.owner_id = $id | ._config.default_project = $project' ~/.claude/discord-sentinel/bots.json > /tmp/bots.tmp && mv /tmp/bots.tmp ~/.claude/discord-sentinel/bots.json
+cd ~/.claude/discord-sentinel
+( umask 077; jq --arg id "<USER_ID>" --arg project "<PROJECT_DIR>" '._config.owner_id = $id | ._config.default_project = $project' bots.json > bots.json.tmp ) && mv bots.json.tmp bots.json
 ```
+
+The owner ID is required: bots ignore every DM until it is set.
 
 ## Step 5: Add first bot
 

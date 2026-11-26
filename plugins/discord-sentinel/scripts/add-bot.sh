@@ -66,7 +66,8 @@ ENTRY=$(jq -n \
    + (if $model   != "" then {model: $model}     else {} end)')
 
 # Add to bots.json (sentinel watches this file and hot-reloads)
-jq --arg name "$NAME" --argjson entry "$ENTRY" '.[$name] = $entry' "$BOTS_FILE" > "${BOTS_FILE}.tmp" \
+# The file holds bot tokens: the umask keeps the rewritten copy private.
+( umask 077; jq --arg name "$NAME" --argjson entry "$ENTRY" '.[$name] = $entry' "$BOTS_FILE" > "${BOTS_FILE}.tmp" ) \
   && mv "${BOTS_FILE}.tmp" "$BOTS_FILE"
 
 echo "Added bot '$NAME' to pool."

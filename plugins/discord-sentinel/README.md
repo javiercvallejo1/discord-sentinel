@@ -195,6 +195,7 @@ Sessions resume where they left off (`--continue` flag). If the [remember](https
 ## Troubleshooting
 
 **Bot is online but doesn't respond to DMs:**
+- Check that `owner_id` is set under `_config` in `bots.json` — without it every DM is ignored
 - Check that **Message Content Intent** is enabled in the Discord Developer Portal (Bot tab > Privileged Gateway Intents)
 - Make sure you and the bot share at least one server
 - Check sentinel logs: `/sentinel logs`

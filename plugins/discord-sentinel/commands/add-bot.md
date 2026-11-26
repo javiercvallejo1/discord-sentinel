@@ -2,7 +2,7 @@
 name: add-bot
 description: Register a new Discord bot with the sentinel — sets up personality and optional approval hook
 allowed_tools: ["Bash", "Read", "Write"]
-args: "[name] [token]"
+argument-hint: "[name] [token]"
 ---
 
 # Add Bot to Sentinel Pool
@@ -61,7 +61,12 @@ Show the user the generated personality and ask if they want to adjust it.
 
 Ask: "Want to enable the approval hook? It sends dangerous commands (git push, rm -rf, etc.) to Discord for your approval before executing. Recommended for remote control."
 
-If yes, note that the approval env vars will be set in the spawn wrapper. The user will need to provide their DM channel ID (they can get it by right-clicking the DM channel with the bot in Discord with Developer Mode enabled).
+If yes, ask for their DM channel ID (right-click the DM channel with the bot in Discord with Developer Mode enabled) and, after Step 5, store it as the bot's `approval_channel`:
+```bash
+cd ~/.claude/discord-sentinel
+( umask 077; jq --arg name "<name>" --arg channel "<channel-id>" '.[$name].approval_channel = $channel' bots.json > bots.json.tmp ) && mv bots.json.tmp bots.json
+```
+The sentinel exports the approval variables to the bot's next session.
 
 ## Step 5: Register
 
@@ -99,16 +104,15 @@ Optional fields:
 
 Example jq command to add directly:
 ```bash
-jq --arg name "<name>" --arg token "<token>" --arg project "<dir>" --arg label "<name>" \
+cd ~/.claude/discord-sentinel
+( umask 077; jq --arg name "<name>" --arg token "<token>" --arg project "<dir>" --arg label "<name>" \
   '.[$name] = {token: $token, project: $project, label: $label}' \
-  ~/.claude/discord-sentinel/bots.json > /tmp/bots.tmp \
-  && mv /tmp/bots.tmp ~/.claude/discord-sentinel/bots.json
+  bots.json > bots.json.tmp ) && mv bots.json.tmp bots.json
 
 # With model override:
-jq --arg name "<name>" --arg token "<token>" --arg project "<dir>" --arg label "<name>" --arg model "<model>" \
+( umask 077; jq --arg name "<name>" --arg token "<token>" --arg project "<dir>" --arg label "<name>" --arg model "<model>" \
   '.[$name] = {token: $token, project: $project, label: $label, model: $model}' \
-  ~/.claude/discord-sentinel/bots.json > /tmp/bots.tmp \
-  && mv /tmp/bots.tmp ~/.claude/discord-sentinel/bots.json
+  bots.json > bots.json.tmp ) && mv bots.json.tmp bots.json
 ```
 
 The sentinel watches bots.json and will automatically:

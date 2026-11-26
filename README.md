@@ -60,10 +60,8 @@ discord-sentinel/
     │   ├── install-daemon.sh        # Installs daemon + launchd service
     │   ├── add-bot.sh / remove-bot.sh
     │   └── uninstall-daemon.sh
-    ├── commands/                # Plugin commands (/install, /add-bot, etc.)
-    ├── hooks/hooks.json         # SessionStart + PreToolUse hooks
-    ├── skills/configure.md      # Interactive reconfiguration
-    └── templates/               # LaunchAgent plist template
+    ├── commands/                # Plugin commands (/install, /add-bot, /configure, etc.)
+    └── hooks/hooks.json         # SessionStart + PreToolUse hooks
 ```
 
 ## Contributing
